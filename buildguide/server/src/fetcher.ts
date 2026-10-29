@@ -286,16 +286,19 @@ export function parseHtml(html: string, baseUrl: string): ParsedPage {
   ).trim();
   const ogImage = abs($('meta[property="og:image"]').attr("content") || $('meta[name="twitter:image"]').attr("content")) ?? undefined;
 
-  // PDF candidates from anchors
+  // PDF candidates from anchors. In-page anchors (#tab) and links back to the
+  // page itself are never manuals, however promising their text looks.
+  const selfUrl = abs(baseUrl);
   const candidates = new Map<string, PdfCandidate>();
   const addCandidate = (url: string | null, text: string) => {
-    if (!url) return;
+    if (!url || url === selfUrl) return;
     const score = scorePdfCandidate(url, text);
     const prev = candidates.get(url);
     if (!prev || prev.score < score) candidates.set(url, { url, text: text.slice(0, 120), score });
   };
   $("a[href]").each((_, el) => {
     const href = $(el).attr("href");
+    if (!href || href.trim().startsWith("#")) return;
     const text = $(el).text().replace(/\s+/g, " ").trim() || $(el).attr("aria-label") || $(el).attr("title") || "";
     const url = abs(href);
     if (!url) return;
@@ -421,24 +424,17 @@ export async function gatherDocumentation(
     imageUrl = page.ogImage;
     sources.push({ kind: "html", url: main.finalUrl, title: page.title || main.finalUrl, size: page.text.length });
 
-    // Download the most promising manuals: try up to 4 candidates concurrently,
-    // keep the first 2 (in rank order) that really are PDFs.
+    // Download the most promising manuals in rank order (parseHtml already
+    // filtered and ranked them), stopping as soon as two real PDFs are in hand
+    // so nothing that would be discarded is ever buffered.
     const MAX_ATTEMPTS = 4;
     const MAX_PDFS = 2;
-    const ranked = page.pdfCandidates.filter((c) => c.score > 0 || looksLikePdfUrl(c.url));
-    const attempts = (ranked.length ? ranked : page.pdfCandidates).slice(0, MAX_ATTEMPTS);
-    if (attempts.length) {
-      onProgress(`Downloading ${attempts.length === 1 ? "the manual" : "manuals"}: ${attempts.map((c) => fileNameFromUrl(c.url)).join(", ")}`);
-      const results = await Promise.allSettled(attempts.map((cand) => fetchBytes(cand.url, config.maxPdfBytes, "application/pdf,*/*")));
-      for (const [i, result] of results.entries()) {
-        if (pdfs.length >= MAX_PDFS) break;
-        const cand = attempts[i];
-        if (result.status === "rejected") {
-          const e: unknown = result.reason;
-          warnings.push(`Could not download ${fileNameFromUrl(cand.url)}: ${e instanceof Error ? e.message : String(e)}`);
-          continue;
-        }
-        const f = result.value;
+    const attempts = page.pdfCandidates.slice(0, MAX_ATTEMPTS);
+    for (const [i, cand] of attempts.entries()) {
+      if (pdfs.length >= MAX_PDFS) break;
+      onProgress(`Downloading manual ${pdfs.length + 1}/${Math.min(MAX_PDFS, attempts.length)}: ${fileNameFromUrl(cand.url)}${i > pdfs.length ? ` (candidate ${i + 1})` : ""}`);
+      try {
+        const f = await fetchBytes(cand.url, config.maxPdfBytes, "application/pdf,*/*");
         if (!isPdf(f.contentType, f.bytes, f.finalUrl)) {
           warnings.push(`${fileNameFromUrl(cand.url)} was not a PDF.`);
           continue;
@@ -446,6 +442,8 @@ export async function gatherDocumentation(
         const pdf = await loadPdf(f.finalUrl, f.bytes, cand.text || fileNameFromUrl(f.finalUrl), warnings);
         pdfs.push(pdf);
         sources.push({ kind: "pdf", url: f.finalUrl, title: pdf.title, size: pdf.bytes.length, pages: pdf.pages });
+      } catch (e) {
+        warnings.push(`Could not download ${fileNameFromUrl(cand.url)}: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
 

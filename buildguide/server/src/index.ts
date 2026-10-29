@@ -37,9 +37,9 @@ const planner = createPlanner();
 
 app.get("/api/config", (_req, res) => {
   res.json({
-    hasApiKey: config.hasApiKey,
+    hasApiKey: config.hasCredentials,
     mock: config.mock,
-    liveGeneration: config.hasApiKey || config.mock,
+    liveGeneration: config.hasCredentials || config.mock,
     allowPrivateUrls: config.allowPrivateUrls,
     model: config.model,
     effort: config.effort,
@@ -58,9 +58,10 @@ app.post("/api/projects", async (req, res) => {
   const url = typeof req.body?.url === "string" ? req.body.url.trim() : "";
   const notes = typeof req.body?.notes === "string" ? req.body.notes.slice(0, 2000) : "";
   if (!url) return res.status(400).json({ error: "Paste a link to the product page or its assembly manual." });
-  if (!config.hasApiKey && !config.mock) {
+  if (!config.hasCredentials && !config.mock) {
     return res.status(503).json({
-      error: "No ANTHROPIC_API_KEY is configured, so new links can't be analysed. Try a sample project, or set the key and restart.",
+      error:
+        "No Claude credentials are configured, so new links can't be analysed. Set ANTHROPIC_API_KEY (or run `ant auth login`) and restart, or try a sample project.",
     });
   }
   const now = new Date().toISOString();
@@ -207,8 +208,11 @@ app.post("/api/projects/:id/chat", async (req, res) => {
   const stepIndex = Math.max(0, Math.min(p.plan.steps.length - 1, Number(req.body?.stepIndex ?? 0) || 0));
 
   const sse = new SseWriter(res);
-  const ctx: ChatContext = { plan: p.plan, history, stepIndex };
-  const useClaude = config.hasApiKey && !config.mock && !p.demo;
+  // Stop paying for tokens the moment the browser goes away.
+  const abort = new AbortController();
+  res.on("close", () => abort.abort());
+  const ctx: ChatContext = { plan: p.plan, history, stepIndex, signal: abort.signal };
+  const useClaude = config.hasCredentials && !config.mock && !p.demo;
   if (useClaude && config.chatIncludesManual) {
     const pdfIndex = p.sources.findIndex((s) => s.kind === "pdf" && s.sentAsDocument !== false);
     if (pdfIndex >= 0) {
@@ -222,6 +226,7 @@ app.post("/api/projects/:id/chat", async (req, res) => {
     if (useClaude) await runClaudeChat(ctx, (ev) => sse.data(ev));
     else await runMockChat(ctx, (ev) => sse.data(ev));
   } catch (err) {
+    if (abort.signal.aborted) return; // client left; nothing to report
     const message = err instanceof Error ? err.message : String(err);
     log.error("chat failed:", message);
     sse.data({ type: "error", message });
@@ -258,7 +263,7 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
 });
 
 app.listen(config.port, () => {
-  const mode = config.mock ? "MOCK (canned plans)" : config.hasApiKey ? `live (${config.model}, effort ${config.effort})` : "demo (no API key: samples only)";
+  const mode = config.mock ? "MOCK (canned plans)" : config.hasCredentials ? `live (${config.model}, effort ${config.effort})` : "demo (no Claude credentials: samples only)";
   log.info(`BuildGuide server on http://localhost:${config.port} — mode: ${mode}`);
   log.info(`data dir: ${config.dataDir}${webDist ? `, serving client from ${webDist}` : ", client not built (use npm run dev)"}`);
 });

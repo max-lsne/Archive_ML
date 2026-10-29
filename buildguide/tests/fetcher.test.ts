@@ -31,6 +31,24 @@ describe("parseHtml", () => {
   });
 });
 
+describe("parseHtml candidate hygiene", () => {
+  const html = `<html><body><main>
+  <a href="#assembly">Assembly instructions</a>
+  <a href="https://shop.example.com/p/desk#assembly">Assembly instructions</a>
+  <a href="/guides/buying-guide">Buying guide</a>
+  <a href="/docs/desk-manual.pdf"><img src="/i/pdf.png"></a>
+  </main></body></html>`;
+  const page = parseHtml(html, "https://shop.example.com/p/desk");
+
+  it("ignores in-page anchors and links back to the page itself", () => {
+    expect(page.pdfCandidates.some((c) => c.url === "https://shop.example.com/p/desk")).toBe(false);
+    expect(page.pdfCandidates.some((c) => c.url.endsWith("#assembly"))).toBe(false);
+  });
+  it("still ranks the real PDF first even with an image-only anchor", () => {
+    expect(page.pdfCandidates[0].url).toBe("https://shop.example.com/docs/desk-manual.pdf");
+  });
+});
+
 describe("scorePdfCandidate", () => {
   it("prefers manual-like names", () => {
     expect(scorePdfCandidate("https://x.com/a/pitching-guide.pdf", "")).toBeGreaterThan(scorePdfCandidate("https://x.com/a/catalogue.pdf", ""));

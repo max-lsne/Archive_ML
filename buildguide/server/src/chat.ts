@@ -12,9 +12,21 @@ export interface ChatContext {
   history: ChatMessage[];
   stepIndex: number;
   manual?: { title: string; bytes: Buffer };
+  /** Aborted when the browser disconnects; stops the model call and the tool loop. */
+  signal?: AbortSignal;
 }
 
 export type Emit = (event: ChatEvent) => void;
+
+/**
+ * Keep the most recent `max` turns, drop empty ones, and re-anchor on a user
+ * message: the API requires the first message of a conversation to be from the user.
+ */
+export function normalizeHistory(history: ChatMessage[], max = 30): ChatMessage[] {
+  const recent = history.slice(-max).filter((m) => m.content.trim().length > 0);
+  const firstUser = recent.findIndex((m) => m.role === "user");
+  return firstUser < 0 ? [] : recent.slice(firstUser);
+}
 
 // ---------------------------------------------------------------------------
 // UI tools: executed by the browser, so the server just validates, forwards and acks.
@@ -147,7 +159,7 @@ export async function runClaudeChat(ctx: ChatContext, emit: Emit): Promise<void>
     });
     messages.push({ role: "assistant", content: "Thanks, I have the manual and the assembly plan. What would you like to know?" });
   }
-  const history = ctx.history.slice(-30).filter((m) => m.content.trim().length > 0);
+  const history = normalizeHistory(ctx.history);
   if (!history.length || history[history.length - 1].role !== "user") {
     throw new Error("The last message must come from the user.");
   }
@@ -159,7 +171,7 @@ export async function runClaudeChat(ctx: ChatContext, emit: Emit): Promise<void>
   let usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
   let jsonRetries = 0;
   const MAX_ITERATIONS = 6;
-  let pendingToolUses = false;
+  const signal = ctx.signal;
 
   const emitText = (text: string) => {
     fullText += text;
@@ -167,19 +179,22 @@ export async function runClaudeChat(ctx: ChatContext, emit: Emit): Promise<void>
   };
 
   for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
+    if (signal?.aborted) return; // the browser is gone; end quietly
     let turnText = "";
-    pendingToolUses = false;
-    const stream = anthropic.beta.messages.stream({
-      model: config.model,
-      max_tokens: 8000,
-      output_config: { effort: config.chatEffort },
-      betas: ["server-side-fallback-2026-07-01"],
-      fallbacks: "default",
-      cache_control: { type: "ephemeral" },
-      system: [{ type: "text", text: chatSystem(plan, Boolean(ctx.manual)), cache_control: { type: "ephemeral" } }],
-      tools: TOOLS,
-      messages,
-    });
+    const stream = anthropic.beta.messages.stream(
+      {
+        model: config.model,
+        max_tokens: 8000,
+        output_config: { effort: config.chatEffort },
+        betas: ["server-side-fallback-2026-07-01"],
+        fallbacks: "default",
+        cache_control: { type: "ephemeral" },
+        system: [{ type: "text", text: chatSystem(plan, Boolean(ctx.manual)), cache_control: { type: "ephemeral" } }],
+        tools: TOOLS,
+        messages,
+      },
+      { signal },
+    );
     stream.on("text", (delta) => {
       turnText += delta;
       emitText(delta);
@@ -190,11 +205,13 @@ export async function runClaudeChat(ctx: ChatContext, emit: Emit): Promise<void>
       message = await stream.finalMessage();
       jsonRetries = 0;
     } catch (err) {
+      if (signal?.aborted || err instanceof Anthropic.APIUserAbortError) return;
       // Re-issuing after text already reached the client would stream the answer twice.
       if (err instanceof Anthropic.APIError || turnText.length > 0 || jsonRetries++ >= 2) throw err;
       log.warn("chat: tool input was not parseable JSON, re-issuing the turn");
       continue;
     }
+    if (signal?.aborted) return;
 
     usage = {
       inputTokens: usage.inputTokens + message.usage.input_tokens,
@@ -218,7 +235,6 @@ export async function runClaudeChat(ctx: ChatContext, emit: Emit): Promise<void>
     }
     const toolUses = message.content.filter((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === "tool_use");
     if (message.stop_reason !== "tool_use" || toolUses.length === 0) break;
-    pendingToolUses = true;
 
     messages.push({ role: "assistant", content: message.content });
     const results: Anthropic.Beta.BetaToolResultBlockParam[] = toolUses.map((tu) => {
@@ -226,14 +242,10 @@ export async function runClaudeChat(ctx: ChatContext, emit: Emit): Promise<void>
       return { type: "tool_result", tool_use_id: tu.id, content: result, is_error: !ok };
     });
     messages.push({ role: "user", content: results });
-    pendingToolUses = false;
     if (iteration === MAX_ITERATIONS - 1) {
       // Tools ran but the model never got to answer: don't end in silence.
       emitText(`${fullText ? "\n\n" : ""}[I stopped after too many view actions. Ask again and I'll keep it shorter.]`);
     }
-  }
-  if (pendingToolUses) {
-    emitText(`${fullText ? "\n\n" : ""}[I stopped before finishing. Ask again and I'll keep it shorter.]`);
   }
 
   emit({
@@ -285,14 +297,13 @@ export async function runMockChat(ctx: ChatContext, emit: Emit): Promise<void> {
 
   // Part lookup by name or label
   const byComponent = instancesByComponent(plan);
-  const comp = plan.components.find(
-    (c) => q.includes(c.name.toLowerCase()) || (c.label && new RegExp(`\\b(part\\s+)?${escapeRe(c.label.toLowerCase())}\\b`).test(q)),
-  );
+  const comp = findComponentInQuestion(plan, q);
   if (comp && /where|what|which|show|find|look|is|does|go/.test(q)) {
     const ids = byComponent.get(comp.id) ?? [];
     const usedIn = plan.steps.filter((s) => s.addInstances.some((id) => ids.includes(id)) || s.hardware.some((h) => h.componentId === comp.id));
-    if (ids.length) act({ name: "highlight_parts", input: { instanceIds: ids } });
+    // Step first: a step change resets highlights on the client, so highlight after it.
     if (usedIn[0]) act({ name: "go_to_step", input: { step: usedIn[0].id } });
+    if (ids.length) act({ name: "highlight_parts", input: { instanceIds: ids } });
     act({ name: "set_exploded", input: { enabled: ids.length > 0 && !comp.isHardware } });
     return say(
       `${comp.name}${comp.label ? ` (${comp.label})` : ""}: ${comp.description || "see the highlighted part in the 3D view."} There ${comp.qty === 1 ? "is one" : `are ${comp.qty}`} in the box${usedIn.length ? `, used in step${usedIn.length > 1 ? "s" : ""} ${usedIn.map((s) => s.id).join(", ")}` : ""}. I've highlighted it for you.`,
@@ -324,6 +335,24 @@ export async function runMockChat(ctx: ChatContext, emit: Emit): Promise<void> {
   return say(
     `I'm running in demo mode without an API key, so I can only answer from the plan itself. ${step ? `Right now you're on step ${step.id}: ${step.voiceScript}` : ""} Try asking "where does part A go", "what tools do I need", or "go to step 3". Add an ANTHROPIC_API_KEY to chat with Claude about the actual manual.`,
   );
+}
+
+/**
+ * Which component is a (lower-cased) question about? Component names win,
+ * longest match first; labels match on their own only when they are longer
+ * than one character, otherwise only as "part A" so the article "a" never matches.
+ */
+export function findComponentInQuestion(plan: AssemblyPlan, q: string): AssemblyPlan["components"][number] | undefined {
+  const byName = plan.components
+    .filter((c) => c.name.trim() && new RegExp(`\\b${escapeRe(c.name.toLowerCase())}s?\\b`).test(q))
+    .sort((a, b) => b.name.length - a.name.length);
+  if (byName.length) return byName[0];
+  return plan.components.find((c) => {
+    const label = c.label.trim().toLowerCase();
+    if (!label) return false;
+    const re = label.length === 1 ? new RegExp(`\\bpart\\s+${escapeRe(label)}\\b`) : new RegExp(`\\b(?:part\\s+)?${escapeRe(label)}\\b`);
+    return re.test(q);
+  });
 }
 
 function escapeRe(s: string): string {
