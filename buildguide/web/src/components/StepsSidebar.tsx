@@ -112,6 +112,16 @@ function Overview() {
     <div>
       <div className="info-block">
         <h4>About</h4>
+        {project.imageUrl && (
+          <img
+            className="product-image"
+            src={project.imageUrl}
+            alt={plan.product.name}
+            onError={(e) => {
+              (e.currentTarget as HTMLImageElement).style.display = "none";
+            }}
+          />
+        )}
         <div className="muted">{plan.product.summary}</div>
         <div className="row" style={{ marginTop: 8, flexWrap: "wrap", gap: 6 }}>
           <span className="badge">{plan.steps.length} steps</span>

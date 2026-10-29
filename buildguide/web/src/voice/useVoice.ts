@@ -270,21 +270,36 @@ export function useVoice() {
       };
       listenOnceInterruptRef.current = () => settle(finalText || interim);
       setVoiceStatus("listening");
-      const ok = recognizer.start({
-        continuous: false,
-        onResult: (text, isFinal) => {
-          if (isFinal) finalText += (finalText ? " " : "") + text;
-          else interim = text;
-          setLastHeard(finalText || interim);
-        },
-        onEnd: () => settle(finalText || interim),
-        onError: (err) => {
-          const message = FATAL_STT_ERRORS[err];
-          if (message) setLastHeard(message);
-          settle(finalText || interim);
-        },
-      });
-      if (!ok) settle("");
+      const begin = (): boolean =>
+        recognizer.start({
+          continuous: false,
+          onResult: (text, isFinal) => {
+            if (isFinal) finalText += (finalText ? " " : "") + text;
+            else interim = text;
+            setLastHeard(finalText || interim);
+          },
+          onEnd: () => settle(finalText || interim),
+          onError: (err) => {
+            const message = FATAL_STT_ERRORS[err];
+            if (message) setLastHeard(message);
+            settle(finalText || interim);
+          },
+        });
+      // Chrome throws InvalidStateError when start() follows an abort too closely
+      // (e.g. hands-free was listening): retry briefly before giving up.
+      const RETRY_DELAYS_MS = [250, 600];
+      const attempt = (retry: number) => {
+        if (settled) return;
+        if (begin()) return;
+        const delay = RETRY_DELAYS_MS[retry];
+        if (delay === undefined) {
+          setLastHeard("Microphone is busy, try again.");
+          settle("");
+          return;
+        }
+        window.setTimeout(() => attempt(retry + 1), delay);
+      };
+      attempt(0);
     });
   }, [recognizer, supported.stt, cancelSpeech, scheduleListen, setLastHeard, setVoiceStatus]);
 

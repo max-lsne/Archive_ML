@@ -146,7 +146,13 @@ export const useStore = create<State>((set, get) => ({
     const completed = { ...get().completed, [stepId]: !get().completed[stepId] };
     set({ completed });
     const id = get().project?.id;
-    if (id) localStorage.setItem(`buildguide.done.${id}`, JSON.stringify(completed));
+    if (id) {
+      try {
+        localStorage.setItem(`buildguide.done.${id}`, JSON.stringify(completed));
+      } catch {
+        /* storage unavailable (private mode, quota); the in-memory toggle still applies */
+      }
+    }
   },
 
   setHighlighted: (ids) => set({ highlighted: ids }),

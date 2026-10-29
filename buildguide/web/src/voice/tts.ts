@@ -83,10 +83,16 @@ export function speak(text: string, opts: SpeakOptions = {}): () => void {
   const voices = getVoices();
   const voice = (opts.voiceURI && voices.find((v) => v.voiceURI === opts.voiceURI)) || pickDefaultVoice(voices);
   let remaining = parts.length;
+  let finished = false;
+  const done = () => {
+    if (finished) return;
+    finished = true;
+    opts.onEnd?.();
+  };
   const finish = () => {
     if (token !== activeToken) return;
     remaining -= 1;
-    if (remaining <= 0) opts.onEnd?.();
+    if (remaining <= 0) done();
   };
   for (const p of parts) {
     const u = new SpeechSynthesisUtterance(p);
@@ -100,10 +106,17 @@ export function speak(text: string, opts: SpeakOptions = {}): () => void {
     u.onerror = finish;
     synth.speak(u);
   }
-  // Safari/Chrome occasionally pause the queue; nudge it.
+  // Safari/Chrome occasionally pause the queue; nudge it. Chrome can also drop
+  // the final onend/onerror entirely, so when the synth has gone quiet while this
+  // speak() is still the active one, treat it as finished rather than hang.
   const nudge = setInterval(() => {
-    if (token !== activeToken || !synth.speaking) {
+    if (token !== activeToken || finished) {
       clearInterval(nudge);
+      return;
+    }
+    if (!synth.speaking && !synth.pending) {
+      clearInterval(nudge);
+      done();
       return;
     }
     if (synth.paused) synth.resume();
@@ -113,7 +126,7 @@ export function speak(text: string, opts: SpeakOptions = {}): () => void {
       activeToken++;
       synth.cancel();
       clearInterval(nudge);
-      opts.onEnd?.();
+      done();
     }
   };
 }

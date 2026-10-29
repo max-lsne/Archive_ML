@@ -64,6 +64,7 @@ export function VoicePanel({ supported, onTest, onClose }: Props) {
           <li>“What parts do I need?” · “Which tools?”</li>
           <li>“Exploded view” · “Stop”</li>
           <li>Anything else is a question for the assistant: “Where does part C go?”</li>
+          <li className="dim">Commands are recognised in English.</li>
         </ul>
       </div>
     </div>

@@ -25,7 +25,19 @@ export function Progress({ project, onRetry, onHome }: Props) {
     <div className="progress-page">
       <div className="progress-card">
         <h2>{project.status === "error" ? "Couldn't build a guide" : "Building your guide"}</h2>
-        <div className="url">{project.url}</div>
+        <div className="url-row">
+          {project.imageUrl && (
+            <img
+              className="product-thumb"
+              src={project.imageUrl}
+              alt=""
+              onError={(e) => {
+                (e.currentTarget as HTMLImageElement).style.display = "none";
+              }}
+            />
+          )}
+          <div className="url">{project.url}</div>
+        </div>
         <div className="stages">
           <Stage n={1} state={stageState(0)} label="Fetching the documentation" detail={project.sources.length ? project.sources.map((s) => `${s.kind.toUpperCase()}: ${s.title || hostOf(s.url)}${s.pages ? ` (${s.pages} pages, ${bytes(s.size)})` : ""}`).join(" · ") : stageState(0) === "active" ? project.progress : "Product page, assembly-manual PDFs, photos"} />
           <Stage n={2} state={stageState(1)} label="Claude studies the manual and computes the 3D plan" detail={stageState(1) === "active" ? `${project.progress}${kb ? ` — ${kb} KB generated` : ""}` : stageState(1) === "done" ? "Done" : "Parts, geometry, steps, voice scripts"} />

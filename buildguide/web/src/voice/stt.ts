@@ -25,7 +25,9 @@ export class Recognizer {
     if (!Ctor) return false;
     this.stop();
     const rec = new Ctor();
-    rec.lang = opts.lang ?? navigator.language ?? "en-US";
+    // The command grammar (shared/voice.ts) is English, so recognise English by
+    // default regardless of the browser locale; callers may override via `lang`.
+    rec.lang = opts.lang ?? "en-US";
     rec.continuous = opts.continuous;
     rec.interimResults = true;
     rec.maxAlternatives = 1;
