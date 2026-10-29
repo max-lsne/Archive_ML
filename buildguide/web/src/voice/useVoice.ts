@@ -76,12 +76,17 @@ export function useVoice() {
     [supported.tts, recognizer, scheduleListen, setVoiceStatus],
   );
 
-  const stop = useCallback(() => {
+  /** Cancel speech and clear the speaking flag (speak()'s onEnd does not fire on cancel). */
+  const cancelSpeech = useCallback(() => {
     stopSpeaking();
     speakingRef.current = false;
+  }, []);
+
+  const stop = useCallback(() => {
+    cancelSpeech();
     setVoiceStatus(handsFreeRef.current ? "listening" : "idle");
     if (handsFreeRef.current) scheduleListen(100);
-  }, [scheduleListen, setVoiceStatus]);
+  }, [cancelSpeech, scheduleListen, setVoiceStatus]);
 
   const speakCurrentStep = useCallback(() => {
     const s = useStore.getState();
@@ -240,7 +245,7 @@ export function useVoice() {
       const wasHandsFree = handsFreeRef.current;
       if (restartTimer.current) window.clearTimeout(restartTimer.current);
       recognizer.stop();
-      stopSpeaking();
+      cancelSpeech();
       let finalText = "";
       let interim = "";
       setVoiceStatus("listening");
@@ -264,7 +269,7 @@ export function useVoice() {
       });
       if (!ok) resolve("");
     });
-  }, [recognizer, supported.stt, scheduleListen, setLastHeard, setVoiceStatus]);
+  }, [recognizer, supported.stt, cancelSpeech, scheduleListen, setLastHeard, setVoiceStatus]);
 
   return { supported, say, stop, speakCurrentStep, listenOnce, stepIndex };
 }

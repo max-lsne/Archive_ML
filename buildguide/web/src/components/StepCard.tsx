@@ -2,6 +2,16 @@ import { useStore } from "../store";
 import { api } from "../api";
 import { minutes } from "../lib/format";
 import { componentMap, instancesByComponent } from "../../../shared/plan";
+import type { SourceDoc } from "../../../shared/project";
+
+/** Index (among PDF sources) of the PDF most likely to be the assembly manual: attached to Claude, most pages. */
+export function pickManualOrdinal(pdfs: SourceDoc[]): number {
+  if (!pdfs.length) return -1;
+  const indexed = pdfs.map((s, i) => ({ s, i }));
+  const eligible = indexed.filter(({ s }) => s.sentAsDocument !== false);
+  const pool = eligible.length ? eligible : indexed;
+  return pool.reduce((best, cur) => ((cur.s.pages ?? 0) > (best.s.pages ?? 0) ? cur : best), pool[0]).i;
+}
 
 interface Props {
   onSpeak: () => void;
@@ -24,7 +34,10 @@ export function StepCard({ onSpeak, onStop, speaking, ttsSupported }: Props) {
   if (!step) return null;
   const components = componentMap(plan);
   const instancesOf = instancesByComponent(plan);
-  const pdfIndex = project.sources.findIndex((s) => s.kind === "pdf");
+  const pdfSources = project.sources.filter((s) => s.kind === "pdf");
+  const manualOrdinal = pickManualOrdinal(pdfSources);
+  const manual = manualOrdinal >= 0 ? pdfSources[manualOrdinal] : undefined;
+  const manualPages = manual ? step.manualPages.filter((p) => !manual.pages || p <= manual.pages) : [];
   const isLast = stepIndex === plan.steps.length - 1;
   const done = Boolean(completed[step.id]);
 
@@ -51,7 +64,7 @@ export function StepCard({ onSpeak, onStop, speaking, ttsSupported }: Props) {
       </div>
       <div className="body">
         <p className="instruction">{step.instruction}</p>
-        {(step.hardware.length > 0 || step.tools.length > 0 || step.manualPages.length > 0) && (
+        {(step.hardware.length > 0 || step.tools.length > 0 || manualPages.length > 0) && (
           <div className="chips">
             {step.hardware.map((h) => {
               const c = components.get(h.componentId);
@@ -68,9 +81,9 @@ export function StepCard({ onSpeak, onStop, speaking, ttsSupported }: Props) {
                 🔧 {t}
               </span>
             ))}
-            {pdfIndex >= 0 &&
-              step.manualPages.map((p) => (
-                <a key={p} className="chip" href={api.manualUrl(project.id, 0, p)} target="_blank" rel="noreferrer" title="Open the manual at this page">
+            {manual &&
+              manualPages.map((p) => (
+                <a key={p} className="chip" href={api.manualUrl(project.id, manualOrdinal, p)} target="_blank" rel="noreferrer" title="Open the manual at this page">
                   📄 Manual p.{p}
                 </a>
               ))}

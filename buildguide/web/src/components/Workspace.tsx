@@ -29,6 +29,7 @@ export function Workspace({ live, onNavigateHome }: Props) {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return; // leave browser chords (Ctrl+R, Cmd+P, Cmd+N) alone
       if (e.key === "ArrowRight" || e.key === "n") nextStep();
       else if (e.key === "ArrowLeft" || e.key === "p") prevStep();
       else if (e.key === "r") repeatStep();

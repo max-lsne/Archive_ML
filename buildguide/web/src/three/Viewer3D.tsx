@@ -1,4 +1,4 @@
-import { Suspense, useMemo, useRef } from "react";
+import { Suspense, useCallback, useMemo, useRef } from "react";
 import { Canvas } from "@react-three/fiber";
 import { ContactShadows, Grid, OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
@@ -36,6 +36,15 @@ export function Viewer3D() {
   const setExploded = useStore((s) => s.setExploded);
   const toggle = useStore((s) => s.toggle);
   const controlsRef = useRef<{ target: THREE.Vector3; update: () => void } | null>(null);
+  // Stable handler (reads the latest selection from the store) so memoised parts don't re-render on every click.
+  const onPartClick = useCallback(
+    (id: string) => {
+      const already = useStore.getState().selected === id;
+      setSelected(already ? null : id);
+      setHighlighted(already ? [] : [id]);
+    },
+    [setSelected, setHighlighted],
+  );
 
   const components = useMemo(() => (plan ? componentMap(plan) : new Map<string, Component>()), [plan]);
   const bounds = useMemo(() => {
@@ -102,11 +111,7 @@ export function Viewer3D() {
             ghostFuture={ghostFuture}
             showLabels={showLabels}
             onHover={setHovered}
-            onClick={(id) => {
-              const already = selected === id;
-              setSelected(already ? null : id);
-              setHighlighted(already ? [] : [id]);
-            }}
+            onClick={onPartClick}
           />
         </Suspense>
         <Grid

@@ -1,4 +1,4 @@
-import { useMemo, useRef } from "react";
+import { memo, useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import { Edges, Html } from "@react-three/drei";
 import * as THREE from "three";
@@ -46,7 +46,7 @@ function easeOutCubic(t: number): number {
   return 1 - Math.pow(1 - t, 3);
 }
 
-export function PartMesh(props: Props) {
+function PartMeshImpl(props: Props) {
   const { instance, component, state, highlighted, dimmed, hovered, showLabel, explodeOffset, introDir, introDistance, introStartedAt, onHover, onClick } = props;
   const mesh = useRef<THREE.Mesh>(null);
   const matRef = useRef<THREE.MeshStandardMaterial>(null);
@@ -155,3 +155,5 @@ export function PartMesh(props: Props) {
     </mesh>
   );
 }
+
+export const PartMesh = memo(PartMeshImpl);

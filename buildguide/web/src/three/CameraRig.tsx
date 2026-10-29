@@ -75,7 +75,8 @@ export function CameraRig({ bounds, focus, view, nonce, controlsRef }: Props) {
     camera.position.copy(tmp.pos);
     controls.target.copy(tmp.target);
     controls.update();
-    if (g.t >= 1 && camera.position.distanceTo(g.pos) < 0.5) goal.current = null;
+    // Time-based completion: with autoRotate on, the camera never settles exactly on the goal.
+    if (g.t >= 1) goal.current = null;
   });
 
   return null;

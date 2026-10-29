@@ -8,16 +8,16 @@ interface Props {
   onClose: () => void;
 }
 
+function Toggle({ on, onChange, disabled }: { on: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
+  return <button className={`toggle ${on ? "on" : ""}`} onClick={() => onChange(!on)} disabled={disabled} role="switch" aria-checked={on} />;
+}
+
 export function VoicePanel({ supported, onTest, onClose }: Props) {
   const voice = useStore((s) => s.voice);
   const setVoice = useStore((s) => s.setVoice);
   const [voices, setVoices] = useState(getVoices());
   useEffect(() => onVoicesChanged(setVoices), []);
   const def = pickDefaultVoice(voices);
-
-  const Toggle = ({ on, onChange, disabled }: { on: boolean; onChange: (v: boolean) => void; disabled?: boolean }) => (
-    <button className={`toggle ${on ? "on" : ""}`} onClick={() => onChange(!on)} disabled={disabled} role="switch" aria-checked={on} />
-  );
 
   return (
     <div className="voice-panel" role="dialog" aria-label="Voice settings">

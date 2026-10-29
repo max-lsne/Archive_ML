@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useStore } from "../store";
 import { minutes, bytes, hostOf, cap } from "../lib/format";
 import { api } from "../api";
-import { instancesByComponent } from "../../../shared/plan";
+import { instancesByComponent, type Component } from "../../../shared/plan";
 
 type Tab = "steps" | "parts" | "overview";
 
@@ -61,8 +61,34 @@ function PartsList() {
   };
   const structural = plan.components.filter((c) => !c.isHardware);
   const hardware = plan.components.filter((c) => c.isHardware);
-  const Item = ({ c }: { c: (typeof plan.components)[number] }) => (
-    <button className={`part-item ${isActive(c.id) ? "active" : ""}`} onClick={() => highlightComponent(c.id)} title={c.description || c.name}>
+  return (
+    <div className="parts-list">
+      <div className="section-title" style={{ margin: "6px 10px 6px" }}>
+        Parts ({structural.length})
+      </div>
+      {structural.map((c) => (
+        <PartItem key={c.id} c={c} active={isActive(c.id)} onClick={() => highlightComponent(c.id)} />
+      ))}
+      {hardware.length > 0 && (
+        <>
+          <div className="section-title" style={{ margin: "14px 10px 6px" }}>
+            Hardware ({hardware.length})
+          </div>
+          {hardware.map((c) => (
+            <PartItem key={c.id} c={c} active={isActive(c.id)} onClick={() => highlightComponent(c.id)} />
+          ))}
+        </>
+      )}
+      <p className="dim" style={{ fontSize: 12, padding: "8px 10px" }}>
+        Click a part to light it up in the 3D view.
+      </p>
+    </div>
+  );
+}
+
+function PartItem({ c, active, onClick }: { c: Component; active: boolean; onClick: () => void }) {
+  return (
+    <button className={`part-item ${active ? "active" : ""}`} onClick={onClick} title={c.description || c.name}>
       <span className="swatch" style={{ background: c.color }} />
       <span>
         <div className="pn">
@@ -75,29 +101,6 @@ function PartsList() {
       </span>
       <span className="qty">×{c.qty}</span>
     </button>
-  );
-  return (
-    <div className="parts-list">
-      <div className="section-title" style={{ margin: "6px 10px 6px" }}>
-        Parts ({structural.length})
-      </div>
-      {structural.map((c) => (
-        <Item key={c.id} c={c} />
-      ))}
-      {hardware.length > 0 && (
-        <>
-          <div className="section-title" style={{ margin: "14px 10px 6px" }}>
-            Hardware ({hardware.length})
-          </div>
-          {hardware.map((c) => (
-            <Item key={c.id} c={c} />
-          ))}
-        </>
-      )}
-      <p className="dim" style={{ fontSize: 12, padding: "8px 10px" }}>
-        Click a part to light it up in the 3D view.
-      </p>
-    </div>
   );
 }
 

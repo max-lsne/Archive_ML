@@ -66,20 +66,20 @@ export function Assembly({ plan, stepIndex, highlighted, hovered, exploded, ghos
       const explodeDist = Math.min(radius * 0.9, out.length() * 0.9 + (comp?.isHardware ? 6 : 14));
       const dir = insertDir ?? explodeDir;
       const introDistance = Math.max(25, radius * 0.5);
-      return { inst, comp, explodeDir, explodeDist, dir, introDistance };
+      const explodeOffset = explodeDir.multiplyScalar(explodeDist * exploded);
+      return { inst, comp, explodeOffset, dir, introDistance };
     });
-  }, [plan, components, center, radius, insertDir]);
+  }, [plan, components, center, radius, insertDir, exploded]);
 
   return (
     <group>
-      {derived.map(({ inst, comp, explodeDir, explodeDist, dir, introDistance }) => {
+      {derived.map(({ inst, comp, explodeOffset, dir, introDistance }) => {
         if (!comp) return null;
         const addedAt = stepOf.get(inst.id);
         let state: PartState;
         if (addedAt === undefined || addedAt < stepIndex) state = "placed";
         else if (addedAt === stepIndex) state = "entering";
         else state = ghostFuture && !comp.isHardware ? "future" : "hidden";
-        const explodeOffset = explodeDir.clone().multiplyScalar(explodeDist * exploded);
         return (
           <PartMesh
             key={inst.id}

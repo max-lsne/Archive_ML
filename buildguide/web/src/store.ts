@@ -44,7 +44,7 @@ interface State {
   mobilePane: "steps" | "viewer" | "chat";
 
   loadProject: (p: Project) => void;
-  setStep: (index: number, opts?: { speak?: boolean }) => void;
+  setStep: (index: number, opts?: { speak?: boolean; keepHighlights?: boolean }) => void;
   nextStep: () => void;
   prevStep: () => void;
   toggleCompleted: (stepId: number) => void;
@@ -129,8 +129,8 @@ export const useStore = create<State>((set, get) => ({
     const i = Math.max(0, Math.min(plan.steps.length - 1, index));
     set((s) => ({
       stepIndex: i,
-      highlighted: [],
-      selected: null,
+      highlighted: opts?.keepHighlights ? s.highlighted : [],
+      selected: opts?.keepHighlights ? s.selected : null,
       view: plan.steps[i].cameraHint === "auto" ? s.view : plan.steps[i].cameraHint,
       viewNonce: s.viewNonce + 1,
       speakNonce: opts?.speak === false ? s.speakNonce : s.speakNonce + 1,
@@ -165,7 +165,8 @@ export const useStore = create<State>((set, get) => ({
     if (!plan) return;
     switch (a.name) {
       case "go_to_step":
-        get().setStep(a.input.step - 1, { speak: false });
+        // The assistant may highlight parts and move to a step in the same turn; keep both.
+        get().setStep(a.input.step - 1, { speak: false, keepHighlights: true });
         break;
       case "highlight_parts":
         set({ highlighted: a.input.instanceIds, selected: a.input.instanceIds[0] ?? null });
