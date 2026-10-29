@@ -164,6 +164,9 @@ describe("isPdf header window", () => {
     const far = Buffer.concat([Buffer.alloc(1100, 0x20), Buffer.from("%PDF-1.7\n")]);
     expect(isPdf("application/octet-stream", near)).toBe(true);
     expect(isPdf("application/octet-stream", far)).toBe(false);
+    // Boundary: offset 1023 is the last valid start; offset 1024 is outside the window.
+    expect(isPdf("", Buffer.concat([Buffer.alloc(1023, 0x20), Buffer.from("%PDF-1.4")]))).toBe(true);
+    expect(isPdf("", Buffer.concat([Buffer.alloc(1024, 0x20), Buffer.from("%PDF-1.4")]))).toBe(false);
     expect(isPdf("", Buffer.from("\xef\xbb\xbf%PDF-1.4", "latin1"))).toBe(true);
   });
 });

@@ -34,4 +34,10 @@ describe("parsePositiveInt (PORT)", () => {
     expect(parsePositiveInt("8787x", 8787, "PORT")).toBe(8787);
     expect(parsePositiveInt("0", 8787, "PORT")).toBe(8787);
   });
+
+  it("rejects ports above 65535 when an upper bound is given", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(parsePositiveInt("70000", 8787, "PORT", 65535)).toBe(8787);
+    expect(parsePositiveInt("65535", 8787, "PORT", 65535)).toBe(65535);
+  });
 });

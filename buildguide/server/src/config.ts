@@ -58,7 +58,7 @@ export function hasProfileCredentials(env: NodeJS.ProcessEnv = process.env): boo
 export const config = {
   /** Interface to bind. Loopback by default: the API has no auth and can spend API credits. */
   host: process.env.HOST || "127.0.0.1",
-  port: parsePositiveInt(process.env.PORT, 8787, "PORT"),
+  port: parsePositiveInt(process.env.PORT, 8787, "PORT", 65535),
   dataDir: path.resolve(process.env.BUILDGUIDE_DATA_DIR ?? "./data"),
   model: process.env.BUILDGUIDE_MODEL ?? "claude-opus-5-5",
   effort: parseEffort(process.env.BUILDGUIDE_EFFORT, "high", "BUILDGUIDE_EFFORT"),
@@ -89,11 +89,11 @@ export const config = {
   fetchMaxTotalMs: 4 * 60_000,
 };
 
-export function parsePositiveInt(v: string | undefined, fallback: number, name: string): number {
+export function parsePositiveInt(v: string | undefined, fallback: number, name: string, max = Number.MAX_SAFE_INTEGER): number {
   if (v === undefined || v === "") return fallback;
   const n = Number(v);
-  if (Number.isInteger(n) && n > 0) return n;
-  console.warn(`[config] ignoring invalid ${name} "${v}" (expected a positive integer); using ${fallback}`);
+  if (Number.isInteger(n) && n > 0 && n <= max) return n;
+  console.warn(`[config] ignoring invalid ${name} "${v}" (expected an integer between 1 and ${max}); using ${fallback}`);
   return fallback;
 }
 
