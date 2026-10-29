@@ -424,6 +424,18 @@ export function normalizePlan(input: unknown): AssemblyPlan {
 // Derived state used by the viewer and the voice assistant.
 // ---------------------------------------------------------------------------
 
+/** Map component id -> component. */
+export function componentMap(plan: AssemblyPlan): Map<string, Component> {
+  return new Map(plan.components.map((c) => [c.id, c]));
+}
+
+/** Map component id -> ids of its instances, in plan order. */
+export function instancesByComponent(plan: AssemblyPlan): Map<string, string[]> {
+  const m = new Map<string, string[]>();
+  for (const inst of plan.instances) m.set(inst.componentId, [...(m.get(inst.componentId) ?? []), inst.id]);
+  return m;
+}
+
 /** Map instance id -> 0-based index of the step that adds it. */
 export function instanceStepIndex(plan: AssemblyPlan): Map<string, number> {
   const m = new Map<string, number>();
@@ -450,7 +462,7 @@ export interface Bounds {
 
 /** Rotation-agnostic bounds (uses each part's bounding sphere). */
 export function planBounds(plan: AssemblyPlan, ids?: Iterable<string>): Bounds {
-  const byComponent = new Map(plan.components.map((c) => [c.id, c]));
+  const byComponent = componentMap(plan);
   const wanted = ids ? new Set(ids) : null;
   const min: [number, number, number] = [Infinity, Infinity, Infinity];
   const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
@@ -487,7 +499,7 @@ export function planBounds(plan: AssemblyPlan, ids?: Iterable<string>): Bounds {
 
 /** Text summary of a step's hardware, e.g. "8 × cam lock, 4 × wood dowel". */
 export function describeHardware(plan: AssemblyPlan, step: Step): string {
-  const byComponent = new Map(plan.components.map((c) => [c.id, c]));
+  const byComponent = componentMap(plan);
   return step.hardware
     .map((h) => {
       const c = byComponent.get(h.componentId);
