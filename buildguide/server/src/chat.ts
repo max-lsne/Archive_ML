@@ -307,12 +307,15 @@ export async function runMockChat(ctx: ChatContext, emit: Emit): Promise<void> {
   const last = ctx.history[ctx.history.length - 1];
   const step = plan.steps[ctx.stepIndex];
   const say = async (text: string) => {
-    // Simulate streaming so the UI path is identical to the real assistant.
+    // Simulate streaming so the UI path is identical to the real assistant;
+    // stop as soon as the browser has gone away, like the Claude path does.
     const words = text.split(/(\s+)/);
     for (const w of words) {
+      if (ctx.signal?.aborted) return;
       emit({ type: "text", text: w });
       await new Promise((r) => setTimeout(r, 12));
     }
+    if (ctx.signal?.aborted) return;
     emit({ type: "done", text });
   };
   const act = (action: UiAction) => emit({ type: "action", action });

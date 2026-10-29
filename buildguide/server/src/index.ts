@@ -25,7 +25,7 @@ import { PlanCancelled, createPlanner } from "./planner.js";
 import { runClaudeChat, runMockChat, type ChatContext } from "./chat.js";
 import { SAMPLE_PLANS, findSample } from "../../shared/samples/index.js";
 import { normalizePlan } from "../../shared/plan.js";
-import { pickManualIndex, type ChatMessage, type Project } from "../../shared/project.js";
+import { pickManualIndex, type ChatMessage, type Project, canAttachPdf } from "../../shared/project.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -242,10 +242,11 @@ async function cachedManual(p: Project): Promise<{ title: string; data: string }
   if (idx < 0) return undefined;
   const source = p.sources.filter((s) => s.kind === "pdf")[idx];
   if (!source) return undefined;
-  // Same attach predicate as the planner: size and page count (when known).
-  if (source.pages && source.pages > config.maxPdfPages) return undefined;
+  // The planner's attach predicate, shared so chat and plan agree on the manual.
+  const limits = { maxAttachPdfBytes: config.maxAttachPdfBytes, maxPdfPages: config.maxPdfPages };
+  if (!canAttachPdf(source.size || 1, source.pages, limits)) return undefined;
   const bytes = await readManual(p.id, idx);
-  if (!bytes || bytes.length > config.maxAttachPdfBytes) return undefined;
+  if (!bytes || !canAttachPdf(bytes.length, source.pages, limits)) return undefined;
   const entry = { title: source.title, data: bytes.toString("base64"), bytes: bytes.length };
   manualCache.set(p.id, entry);
   while (manualCache.size > MANUAL_CACHE_MAX) {
@@ -321,8 +322,9 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   if (!res.headersSent) res.status(status).json({ error: message });
 });
 
-app.listen(config.port, () => {
+app.listen(config.port, config.host, () => {
   const mode = config.mock ? "MOCK (canned plans)" : config.hasCredentials ? `live (${config.model}, effort ${config.effort})` : "demo (no Claude credentials: samples only)";
-  log.info(`BuildGuide server on http://localhost:${config.port} — mode: ${mode}`);
+  const shownHost = config.host.includes(":") ? `[${config.host}]` : config.host;
+  log.info(`BuildGuide server on http://${shownHost}:${config.port} — mode: ${mode}`);
   log.info(`data dir: ${config.dataDir}${webDist ? `, serving client from ${webDist}` : ", client not built (use npm run dev)"}`);
 });

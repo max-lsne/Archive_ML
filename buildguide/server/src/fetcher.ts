@@ -148,26 +148,11 @@ function proxyEnv(): string | undefined {
   return process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
 }
 
-/** Hostnames of the configured proxies: connections to them are ours, not the user's link, so they skip the guard. */
-function proxyHosts(): Set<string> {
-  const hosts = new Set<string>();
-  for (const v of [process.env.HTTPS_PROXY, process.env.https_proxy, process.env.HTTP_PROXY, process.env.http_proxy]) {
-    if (!v) continue;
-    try {
-      hosts.add(new URL(v).hostname.replace(/^\[|\]$/g, "").toLowerCase());
-    } catch {
-      /* unparsable proxy value: ignore */
-    }
-  }
-  return hosts;
-}
-
 const guardedLookup: net.LookupFunction = (hostname, options, callback) => {
   dnsCallback.lookup(hostname, options, (err, address, family) => {
     if (err) return callback(err, address, family);
     const addresses = Array.isArray(address) ? address.map((a) => a.address) : [address];
-    const isProxy = proxyHosts().has(hostname.toLowerCase());
-    if (!config.allowPrivateUrls && !isProxy && addresses.some((a) => typeof a === "string" && isPrivateAddress(a))) {
+    if (!config.allowPrivateUrls && addresses.some((a) => typeof a === "string" && isPrivateAddress(a))) {
       const refused: NodeJS.ErrnoException = new Error(`${hostname} resolves to a private network address`);
       refused.code = "EPRIVATEADDR";
       return callback(refused, address, family);
@@ -179,12 +164,13 @@ const guardedLookup: net.LookupFunction = (hostname, options, callback) => {
 let dispatcher: Dispatcher | undefined;
 function getDispatcher(): Dispatcher {
   if (dispatcher) return dispatcher;
-  // Honouring HTTPS_PROXY here removes the need for NODE_USE_ENV_PROXY. The proxy
-  // agent still dials NO_PROXY hosts directly, so the guarded lookup goes on both
-  // (connections to the proxy itself are exempted inside guardedLookup).
-  dispatcher = proxyEnv()
-    ? new EnvHttpProxyAgent({ connect: { lookup: guardedLookup } })
-    : new Agent({ connect: { lookup: guardedLookup } });
+  // Direct connections resolve names through guardedLookup, which refuses private
+  // addresses at connect time. Behind a proxy (HTTPS_PROXY / HTTP_PROXY) name
+  // resolution is the proxy's job: undici's proxy agent offers no lookup hook, so
+  // the pin cannot apply there and the proxy's own policy decides what internal
+  // names it will reach. assertPublicHost still rejects literal and local hosts
+  // on every hop in both modes.
+  dispatcher = proxyEnv() ? new EnvHttpProxyAgent() : new Agent({ connect: { lookup: guardedLookup } });
   return dispatcher;
 }
 
@@ -200,7 +186,12 @@ export class FetchCancelled extends FetchError {
   }
 }
 
-async function fetchBytes(url: string, maxBytes: number, accept = "*/*", signal?: AbortSignal): Promise<Fetched> {
+interface FetchOptions {
+  /** Reject web pages before reading the body and non-PDF bodies after the first chunk. */
+  expectPdf?: boolean;
+}
+
+async function fetchBytes(url: string, maxBytes: number, accept = "*/*", signal?: AbortSignal, opts: FetchOptions = {}): Promise<Fetched> {
   if (signal?.aborted) throw new FetchCancelled();
   const ctrl = new AbortController();
   // Idle timeout (reset on every redirect hop and every received chunk) so a large
@@ -256,11 +247,19 @@ async function fetchBytes(url: string, maxBytes: number, accept = "*/*", signal?
       if (!res.ok) {
         throw new FetchError(`The site answered ${res.status} ${res.statusText || ""}`.trim(), res.status);
       }
+      const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
+      const mime = contentType.split(";")[0].trim();
+      if (opts.expectPdf && (mime === "text/html" || mime === "application/xhtml+xml")) {
+        // A web page where a manual was expected: don't buffer it at all.
+        await res.body?.cancel().catch(() => {});
+        throw new FetchError("The link was a web page, not a PDF.");
+      }
       const len = Number(res.headers.get("content-length") ?? 0);
       if (len && len > maxBytes) throw new FetchError(`File is too large (${(len / 1e6).toFixed(1)} MB).`);
       if (!res.body) throw new FetchError("Empty response.");
       const chunks: Uint8Array[] = [];
       let total = 0;
+      let magicChecked = false;
       const reader = res.body.getReader();
       for (;;) {
         const { done, value } = await reader.read();
@@ -272,10 +271,18 @@ async function fetchBytes(url: string, maxBytes: number, accept = "*/*", signal?
           throw new FetchError(`File is too large (over ${(maxBytes / 1e6).toFixed(0)} MB).`);
         }
         chunks.push(value);
+        if (opts.expectPdf && !magicChecked && total >= 5) {
+          // Decide on the first bytes rather than after buffering up to the cap.
+          magicChecked = true;
+          if (!hasPdfMagic(Buffer.concat(chunks).subarray(0, 5)) && mime !== "application/pdf") {
+            reader.cancel().catch(() => {});
+            throw new FetchError("The link was not a PDF.");
+          }
+        }
       }
       return {
         finalUrl: current.toString(),
-        contentType: (res.headers.get("content-type") ?? "").toLowerCase(),
+        contentType,
         bytes: Buffer.concat(chunks),
       };
     }
@@ -469,22 +476,75 @@ function fileNameFromUrl(url: string): string {
   }
 }
 
+export interface SniffedImage {
+  mediaType: ImageDoc["mediaType"];
+  width?: number;
+  height?: number;
+}
+
+/** Image dimensions from a JPEG's first SOF marker (undefined when none is found before the scan data). */
+function jpegDimensions(b: Buffer): { width?: number; height?: number } {
+  let i = 2;
+  while (i + 9 < b.length) {
+    if (b[i] !== 0xff) {
+      i++;
+      continue;
+    }
+    const marker = b[i + 1];
+    if (marker === 0xff) {
+      i++;
+      continue;
+    }
+    // Standalone markers carry no length.
+    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+      i += 2;
+      continue;
+    }
+    if (marker === 0xda) break; // start of scan: no frame header found
+    const len = b.readUInt16BE(i + 2);
+    const isSof = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+    if (isSof) return { height: b.readUInt16BE(i + 5), width: b.readUInt16BE(i + 7) };
+    i += 2 + len;
+  }
+  return {};
+}
+
+/**
+ * Identify an image by its magic bytes (never by the URL or the declared type)
+ * and read its pixel size where the format makes that cheap (PNG, JPEG, GIF).
+ */
+export function sniffImage(bytes: Uint8Array): SniffedImage | null {
+  if (bytes.length < 12) return null;
+  const b = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return { mediaType: "image/jpeg", ...jpegDimensions(b) };
+  if (b[0] === 0x89 && b.toString("latin1", 1, 4) === "PNG") {
+    const dims = b.length >= 24 && b.toString("latin1", 12, 16) === "IHDR" ? { width: b.readUInt32BE(16), height: b.readUInt32BE(20) } : {};
+    return { mediaType: "image/png", ...dims };
+  }
+  if (b.toString("latin1", 0, 4) === "GIF8") return { mediaType: "image/gif", width: b.readUInt16LE(6), height: b.readUInt16LE(8) };
+  if (b.toString("latin1", 0, 4) === "RIFF" && b.toString("latin1", 8, 12) === "WEBP") return { mediaType: "image/webp" };
+  return null;
+}
+
+/** API limits: 5 MB per image and 8000 px on either side; stay under both. */
+const MAX_IMAGE_BYTES = Math.floor(4.5 * 1024 * 1024);
+const MAX_IMAGE_DIM = 8000;
+
+/** Best-effort: anything that is not plainly a usable image is skipped, never fatal. */
 async function fetchImage(url: string, signal?: AbortSignal): Promise<ImageDoc | null> {
   try {
-    const f = await fetchBytes(url, 6 * 1024 * 1024, "image/*", signal);
-    const ct = f.contentType.split(";")[0].trim();
-    const allowed = ["image/jpeg", "image/png", "image/gif", "image/webp"] as const;
-    const mediaType = (allowed as readonly string[]).includes(ct)
-      ? (ct as ImageDoc["mediaType"])
-      : /\.(jpe?g)(\?|$)/i.test(url)
-        ? "image/jpeg"
-        : /\.png(\?|$)/i.test(url)
-          ? "image/png"
-          : /\.webp(\?|$)/i.test(url)
-            ? "image/webp"
-            : null;
-    if (!mediaType || f.bytes.length < 2000) return null;
-    return { url, mediaType, bytes: f.bytes };
+    const f = await fetchBytes(url, MAX_IMAGE_BYTES, "image/*", signal);
+    if (f.bytes.length < 2000) return null;
+    const sniffed = sniffImage(f.bytes);
+    if (!sniffed) return null;
+    // The declared type may be absent or generic, but when it names an image
+    // format it has to be the one the bytes actually are.
+    const declared = f.contentType.split(";")[0].trim();
+    const declaredOk =
+      declared === "" || declared === "application/octet-stream" || declared === sniffed.mediaType || (declared === "image/jpg" && sniffed.mediaType === "image/jpeg");
+    if (!declaredOk) return null;
+    if ((sniffed.width ?? 0) > MAX_IMAGE_DIM || (sniffed.height ?? 0) > MAX_IMAGE_DIM) return null;
+    return { url, mediaType: sniffed.mediaType, bytes: f.bytes };
   } catch (e) {
     if (e instanceof FetchCancelled) throw e;
     return null;
@@ -519,7 +579,7 @@ export async function gatherDocumentation(
     pdfs.push(pdf);
     pageTitle = pdf.title;
     sources.push({ kind: "pdf", url: main.finalUrl, title: pdf.title, size: pdf.bytes.length, pages: pdf.pages });
-  } else if (main.contentType.includes("html") || main.bytes.subarray(0, 512).toString("utf8").toLowerCase().includes("<html")) {
+  } else if (main.contentType.includes("html") || /<!doctype|<html|<head|<body/.test(main.bytes.subarray(0, 4096).toString("utf8").toLowerCase())) {
     onProgress("Reading the product page…");
     const page = parseHtml(main.bytes.toString("utf8"), main.finalUrl);
     pageTitle = page.title;
@@ -529,8 +589,9 @@ export async function gatherDocumentation(
     sources.push({ kind: "html", url: main.finalUrl, title: page.title || main.finalUrl, size: page.text.length });
 
     // Download the most promising manuals in rank order (parseHtml already
-    // filtered and ranked them), stopping as soon as two real PDFs are in hand
-    // so nothing that would be discarded is ever buffered.
+    // filtered and ranked them), stopping as soon as two real PDFs are in hand.
+    // expectPdf makes fetchBytes drop web pages and non-PDF bodies on the first
+    // bytes, so a wrong candidate never gets buffered to the size cap.
     const MAX_ATTEMPTS = 4;
     const MAX_PDFS = 2;
     const attempts = page.pdfCandidates.slice(0, MAX_ATTEMPTS);
@@ -538,7 +599,7 @@ export async function gatherDocumentation(
       if (pdfs.length >= MAX_PDFS) break;
       onProgress(`Downloading manual ${pdfs.length + 1}/${Math.min(MAX_PDFS, attempts.length)}: ${fileNameFromUrl(cand.url)}${i > pdfs.length ? ` (candidate ${i + 1})` : ""}`);
       try {
-        const f = await fetchBytes(cand.url, config.maxPdfBytes, "application/pdf,*/*", signal);
+        const f = await fetchBytes(cand.url, config.maxPdfBytes, "application/pdf,*/*", signal, { expectPdf: true });
         if (!isPdf(f.contentType, f.bytes)) {
           warnings.push(`${fileNameFromUrl(cand.url)} was not a PDF.`);
           continue;

@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { AssemblyPlanSchema, normalizePlan, type AssemblyPlan } from "../../shared/plan.js";
-import type { Usage } from "../../shared/project.js";
+import { canAttachPdf, type Usage } from "../../shared/project.js";
 import { SAMPLE_PLANS } from "../../shared/samples/index.js";
 import { config } from "./config.js";
 import { log } from "./logger.js";
@@ -59,12 +59,11 @@ export class ClaudePlanner implements Planner {
     let payload = 0;
     for (const pdf of gathered.pdfs) {
       const encoded = base64Size(pdf.bytes.length);
+      // canAttachPdf is shared with the chat route so both sides agree on which
+      // manual Claude sees; the request-wide base64 budget is the planner's own.
       const attach =
-        pdf.bytes.length <= config.maxAttachPdfBytes &&
-        payload + encoded <= config.maxRequestBytes &&
-        // pages === 0 means the text layer could not be read: fall back to text only.
-        pdf.pages > 0 &&
-        pdf.pages <= config.maxPdfPages;
+        canAttachPdf(pdf.bytes.length, pdf.pages, { maxAttachPdfBytes: config.maxAttachPdfBytes, maxPdfPages: config.maxPdfPages }) &&
+        payload + encoded <= config.maxRequestBytes;
       if (attach) payload += encoded;
       sentAsDocument.push(attach);
       if (attach) {

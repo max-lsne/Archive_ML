@@ -5,6 +5,8 @@ import { config } from "./config.js";
 import type { Project, ProjectSummary } from "../../shared/project.js";
 
 const projects = new Map<string, Project>();
+/** Lightweight listing entries, so GET /api/projects never re-parses every stored plan. */
+const summaries = new Map<string, ProjectSummary>();
 /** Ids deleted while a pipeline may still be running; writes for them are dropped. */
 const tombstones = new Set<string>();
 /** Abort controllers of pipelines still running, so a delete can stop their network and model calls. */
@@ -38,11 +40,23 @@ export function isValidId(id: string): boolean {
   return /^[a-zA-Z0-9_-]{4,64}$/.test(id);
 }
 
+function toSummary(p: Project): ProjectSummary {
+  return {
+    id: p.id,
+    url: p.url,
+    status: p.status,
+    name: p.plan?.product.name ?? p.url,
+    createdAt: p.createdAt,
+    demo: p.demo,
+  };
+}
+
 /** Persist a project. Returns false (and writes nothing) if it was deleted meanwhile. */
 export async function saveProject(p: Project): Promise<boolean> {
   if (tombstones.has(p.id)) return false;
   p.updatedAt = new Date().toISOString();
   projects.set(p.id, p);
+  summaries.set(p.id, toSummary(p));
   emitter.emit(`project:${p.id}`, p);
   await fs.mkdir(projectDir(p.id), { recursive: true });
   const tmp = projectFile(p.id) + ".tmp";
@@ -61,6 +75,7 @@ export function touchProject(p: Project): boolean {
   if (tombstones.has(p.id)) return false;
   p.updatedAt = new Date().toISOString();
   projects.set(p.id, p);
+  summaries.set(p.id, toSummary(p));
   emitter.emit(`project:${p.id}`, p);
   return true;
 }
@@ -86,7 +101,10 @@ export async function getProject(id: string): Promise<Project | undefined> {
   const cached = projects.get(id);
   if (cached) return cached;
   const p = await readProjectFile(id);
-  if (p) projects.set(id, p);
+  if (p) {
+    projects.set(id, p);
+    summaries.set(id, toSummary(p));
+  }
   return p;
 }
 
@@ -98,24 +116,30 @@ export async function listProjects(): Promise<ProjectSummary[]> {
   } catch {
     /* no data yet */
   }
-  // Summaries only: don't pull every plan into the long-lived cache.
-  const loaded = await Promise.all(
-    ids.filter((id) => isValidId(id) && !tombstones.has(id)).map(async (id) => projects.get(id) ?? (await readProjectFile(id))),
+  // Serve from the summary cache; only ids never seen since startup hit the disk,
+  // and their full plan is parsed once to fill the cache, not kept in memory.
+  const out = await Promise.all(
+    ids
+      .filter((id) => isValidId(id) && !tombstones.has(id))
+      .map(async (id): Promise<ProjectSummary | undefined> => {
+        const cached = summaries.get(id);
+        if (cached) return cached;
+        const live = projects.get(id);
+        if (live) {
+          const summary = toSummary(live);
+          summaries.set(id, summary);
+          return summary;
+        }
+        const p = await readProjectFile(id);
+        if (!p) return undefined;
+        const summary = toSummary(p);
+        summaries.set(id, summary);
+        return summary;
+      }),
   );
-  const out: ProjectSummary[] = [];
-  for (const p of loaded) {
-    if (!p) continue;
-    out.push({
-      id: p.id,
-      url: p.url,
-      status: p.status,
-      name: p.plan?.product.name ?? p.url,
-      createdAt: p.createdAt,
-      demo: p.demo,
-    });
-  }
-  out.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-  return out;
+  const list = out.filter((s): s is ProjectSummary => Boolean(s));
+  list.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  return list;
 }
 
 export async function deleteProject(id: string): Promise<boolean> {
@@ -127,6 +151,7 @@ export async function deleteProject(id: string): Promise<boolean> {
   const pipeline = pipelines.get(id);
   if (pipeline) tombstones.add(id);
   projects.delete(id);
+  summaries.delete(id);
   // Stop a pipeline that is still fetching or waiting on Claude: no point paying for a discarded plan.
   pipeline?.abort();
   // Let open /events streams finish instead of pinging a deleted project forever.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hostIsPrivateLiteral, isPdf, isPrivateAddress, normalizeUrl, parseHtml, rankPdfCandidates, scorePdfCandidate } from "../server/src/fetcher";
+import { hostIsPrivateLiteral, isPdf, isPrivateAddress, normalizeUrl, parseHtml, rankPdfCandidates, scorePdfCandidate, sniffImage } from "../server/src/fetcher";
 import { parseLooseJson } from "../server/src/planner";
 
 describe("parseHtml", () => {
@@ -174,5 +174,45 @@ describe("isPrivateAddress IPv6 link-local", () => {
   it("covers the whole fe80::/10 block, not just fe80", () => {
     for (const ip of ["fe80::1", "fe90::1", "fea0::dead", "febf::1"]) expect(isPrivateAddress(ip), ip).toBe(true);
     for (const ip of ["fec0::1", "fe00::1", "2606:4700::1111"]) expect(isPrivateAddress(ip), ip).toBe(false);
+  });
+});
+
+describe("sniffImage", () => {
+  const png = (w: number, h: number) => {
+    const b = Buffer.alloc(33, 0);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b, 0);
+    b.writeUInt32BE(13, 8);
+    b.write("IHDR", 12, "latin1");
+    b.writeUInt32BE(w, 16);
+    b.writeUInt32BE(h, 20);
+    return b;
+  };
+  const jpeg = (w: number, h: number) => {
+    // SOI, APP0 (length 16), SOF0 (length 17) with height/width, then SOS.
+    const b = Buffer.alloc(2 + 18 + 19 + 2, 0);
+    let i = 0;
+    b[i++] = 0xff; b[i++] = 0xd8;
+    b[i++] = 0xff; b[i++] = 0xe0; b.writeUInt16BE(16, i); i += 16;
+    b[i++] = 0xff; b[i++] = 0xc0; b.writeUInt16BE(17, i); b[i + 2] = 8; b.writeUInt16BE(h, i + 3); b.writeUInt16BE(w, i + 5); i += 17;
+    b[i++] = 0xff; b[i++] = 0xda;
+    return b;
+  };
+  it("reads PNG dimensions from IHDR", () => {
+    expect(sniffImage(png(640, 480))).toEqual({ mediaType: "image/png", width: 640, height: 480 });
+  });
+  it("reads JPEG dimensions from the frame header", () => {
+    expect(sniffImage(jpeg(1200, 900))).toEqual({ mediaType: "image/jpeg", width: 1200, height: 900 });
+  });
+  it("recognises GIF and WebP by magic bytes", () => {
+    const gif = Buffer.concat([Buffer.from("GIF89a", "latin1"), Buffer.from([0x10, 0x00, 0x08, 0x00, 0, 0, 0, 0, 0, 0])]);
+    expect(sniffImage(gif)).toEqual({ mediaType: "image/gif", width: 16, height: 8 });
+    const webp = Buffer.concat([Buffer.from("RIFF", "latin1"), Buffer.alloc(4), Buffer.from("WEBPVP8 ", "latin1"), Buffer.alloc(8)]);
+    expect(sniffImage(webp)).toEqual({ mediaType: "image/webp" });
+  });
+  it("rejects HTML, AVIF and tiny buffers", () => {
+    expect(sniffImage(Buffer.from("<!doctype html><html><body>denied</body></html>"))).toBeNull();
+    const avif = Buffer.concat([Buffer.from([0, 0, 0, 0x1c]), Buffer.from("ftypavif", "latin1"), Buffer.alloc(16)]);
+    expect(sniffImage(avif)).toBeNull();
+    expect(sniffImage(Buffer.from([0xff, 0xd8, 0xff]))).toBeNull();
   });
 });

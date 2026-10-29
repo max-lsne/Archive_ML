@@ -56,6 +56,8 @@ export function hasProfileCredentials(env: NodeJS.ProcessEnv = process.env): boo
 }
 
 export const config = {
+  /** Interface to bind. Loopback by default: the API has no auth and can spend API credits. */
+  host: process.env.HOST || "127.0.0.1",
   port: Number(process.env.PORT ?? 8787),
   dataDir: path.resolve(process.env.BUILDGUIDE_DATA_DIR ?? "./data"),
   model: process.env.BUILDGUIDE_MODEL ?? "claude-opus-5-5",
