@@ -67,6 +67,12 @@ export async function saveProject(p: Project): Promise<boolean> {
     return false;
   }
   await fs.rename(tmp, projectFile(p.id));
+  if (tombstones.has(p.id)) {
+    // A delete raced the rename: its rm may have listed the directory before the
+    // file landed, so remove it again.
+    await fs.rm(projectDir(p.id), { recursive: true, force: true }).catch(() => {});
+    return false;
+  }
   return true;
 }
 

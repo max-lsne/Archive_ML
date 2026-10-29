@@ -20,7 +20,7 @@ import {
   touchProject,
   unregisterPipeline,
 } from "./store.js";
-import { FetchCancelled, FetchError, gatherDocumentation, hostIsPrivateLiteral, normalizeUrl } from "./fetcher.js";
+import { FetchCancelled, FetchError, assertPublicHostLiteral, gatherDocumentation, normalizeUrl } from "./fetcher.js";
 import { PlanCancelled, createPlanner } from "./planner.js";
 import { runClaudeChat, runMockChat, type ChatContext } from "./chat.js";
 import { SAMPLE_PLANS, findSample } from "../../shared/samples/index.js";
@@ -66,9 +66,7 @@ app.post("/api/projects", async (req, res) => {
   let target: URL;
   try {
     target = normalizeUrl(url);
-    if (!config.allowPrivateUrls && hostIsPrivateLiteral(target.hostname) === true) {
-      throw new FetchError("Links to local or private network addresses are not allowed.");
-    }
+    assertPublicHostLiteral(target);
   } catch (e) {
     if (e instanceof FetchError) return res.status(400).json({ error: e.message });
     throw e;

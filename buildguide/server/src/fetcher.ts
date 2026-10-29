@@ -118,11 +118,20 @@ export function hostIsPrivateLiteral(hostname: string): boolean | null {
 }
 
 /** Basic SSRF hygiene: refuse to fetch loopback/private hosts (unless explicitly allowed for local testing). */
-async function assertPublicHost(url: URL): Promise<void> {
-  if (config.allowPrivateUrls) return;
+/**
+ * Synchronous half of the SSRF check (literal IPs and local names); used by the
+ * create-project route for an early 400 and by assertPublicHost on every hop.
+ * Returns true when the host is a public literal and needs no DNS check.
+ */
+export function assertPublicHostLiteral(url: URL): boolean {
+  if (config.allowPrivateUrls) return true;
   const literal = hostIsPrivateLiteral(url.hostname);
   if (literal === true) throw new FetchError("Links to local or private network addresses are not allowed.");
-  if (literal === false) return;
+  return literal === false;
+}
+
+async function assertPublicHost(url: URL): Promise<void> {
+  if (assertPublicHostLiteral(url)) return;
   try {
     const addrs = await dns.lookup(url.hostname, { all: true });
     if (addrs.some((a) => isPrivateAddress(a.address))) {
@@ -606,11 +615,12 @@ async function fetchImage(url: string, signal?: AbortSignal): Promise<ImageDoc |
     if (f.bytes.length < 2000) return null;
     const sniffed = sniffImage(f.bytes);
     if (!sniffed) return null;
-    // The declared type may be absent or generic, but when it names an image
-    // format it has to be the one the bytes actually are.
+    // The declared type may be absent or generic (octet-stream, text/plain from a
+    // misconfigured CDN); the magic bytes decide. Only a declared *image* type that
+    // disagrees with the bytes is treated as suspicious.
     const declared = f.contentType.split(";")[0].trim();
     const declaredOk =
-      declared === "" || declared === "application/octet-stream" || declared === sniffed.mediaType || (declared === "image/jpg" && sniffed.mediaType === "image/jpeg");
+      !declared.startsWith("image/") || declared === sniffed.mediaType || (declared === "image/jpg" && sniffed.mediaType === "image/jpeg");
     if (!declaredOk) return null;
     if ((sniffed.width ?? 0) > MAX_IMAGE_DIM || (sniffed.height ?? 0) > MAX_IMAGE_DIM) return null;
     return { url, mediaType: sniffed.mediaType, bytes: f.bytes };

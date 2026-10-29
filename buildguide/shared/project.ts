@@ -94,6 +94,9 @@ export function pickManualIndex(sources: SourceDoc[], opts: { attachedOnly?: boo
   return pdfs.indexOf(best);
 }
 
+/** Largest PDF attached when its page count could not be determined (5 MiB). */
+export const UNKNOWN_PAGES_MAX_BYTES = 5 * 1024 * 1024;
+
 export interface PdfAttachLimits {
   /** Largest raw PDF, in bytes, that may be sent to Claude as a document. */
   maxAttachPdfBytes: number;
@@ -108,8 +111,10 @@ export interface PdfAttachLimits {
  */
 export function canAttachPdf(bytes: number, pages: number | undefined, limits: PdfAttachLimits): boolean {
   if (bytes <= 0 || bytes > limits.maxAttachPdfBytes) return false;
-  // An unknown page count (pdfjs could not parse a file that still carries the
-  // %PDF magic) is attached: Claude's reader is more tolerant than pdfjs.
-  if (pages === undefined || pages <= 0) return true;
+  // An unknown page count (pdfjs could not parse, timed out or crashed on a file
+  // that still carries the %PDF magic) is attached only when the file is small
+  // enough that it cannot plausibly exceed the page limit; larger ones fall back
+  // to whatever text was extracted rather than risk a rejected request.
+  if (pages === undefined || pages <= 0) return bytes <= Math.min(limits.maxAttachPdfBytes, UNKNOWN_PAGES_MAX_BYTES);
   return pages <= limits.maxPdfPages;
 }

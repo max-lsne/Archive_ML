@@ -61,15 +61,13 @@ export function Assembly({ plan, bounds, stepIndex, highlighted, hovered, explod
       const explodeDist = Math.min(radius * 0.9, out.length() * 0.9 + (comp?.isHardware ? 6 : 14));
       const dir = insertDir ?? explodeDir;
       const introDistance = Math.max(25, radius * 0.5);
-      // Clone: `dir` may alias explodeDir and must stay a unit vector.
-      const explodeOffset = explodeDir.clone().multiplyScalar(explodeDist * exploded);
-      return { inst, comp, explodeOffset, dir, introDistance };
+      return { inst, comp, explodeDir, explodeDist, dir, introDistance };
     });
-  }, [plan, components, center, radius, insertDir, exploded]);
+  }, [plan, components, center, radius, insertDir]);
 
   return (
     <group>
-      {derived.map(({ inst, comp, explodeOffset, dir, introDistance }) => {
+      {derived.map(({ inst, comp, explodeDir, explodeDist, dir, introDistance }) => {
         if (!comp) return null;
         const addedAt = stepOf.get(inst.id);
         let state: PartState;
@@ -86,7 +84,9 @@ export function Assembly({ plan, bounds, stepIndex, highlighted, hovered, explod
             dimmed={anyHighlight && !highlightedSet.has(inst.id) && state !== "future"}
             hovered={hovered === inst.id}
             showLabel={showLabels && !comp.isHardware}
-            explodeOffset={explodeOffset}
+            explodeDir={explodeDir}
+            explodeDist={explodeDist}
+            exploded={exploded}
             introDir={dir}
             introDistance={introDistance}
             introStartedAt={introStartedAt.current}

@@ -65,6 +65,8 @@ interface SpeakOptions {
 }
 
 let activeToken = 0;
+/** Utterances of the active speak(); Chrome may garbage-collect unreferenced ones before onend fires. */
+let retained: SpeechSynthesisUtterance[] = [];
 
 /** Speak `text`, cancelling anything already playing. Returns a cancel function. */
 export function speak(text: string, opts: SpeakOptions = {}): () => void {
@@ -74,6 +76,7 @@ export function speak(text: string, opts: SpeakOptions = {}): () => void {
   }
   const synth = window.speechSynthesis;
   synth.cancel();
+  retained = [];
   const token = ++activeToken;
   const parts = chunk(text);
   if (!parts.length) {
@@ -85,6 +88,7 @@ export function speak(text: string, opts: SpeakOptions = {}): () => void {
   let remaining = parts.length;
   let finished = false;
   const done = () => {
+    retained = [];
     if (finished) return;
     finished = true;
     opts.onEnd?.();
@@ -104,6 +108,7 @@ export function speak(text: string, opts: SpeakOptions = {}): () => void {
     u.pitch = 1;
     u.onend = finish;
     u.onerror = finish;
+    retained.push(u);
     synth.speak(u);
   }
   // Safari/Chrome occasionally pause the queue; nudge it. Chrome can also drop

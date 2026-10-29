@@ -236,6 +236,9 @@ export function useVoice() {
 
   useEffect(() => {
     handsFreeRef.current = voice.handsFree;
+    // A push-to-talk session in flight would otherwise be detached by
+    // recognizer.stop() and never resolve; settle it with what was heard.
+    listenOnceInterruptRef.current?.();
     if (voice.handsFree) {
       idleEnds.current = 0;
       setLastHeard("");

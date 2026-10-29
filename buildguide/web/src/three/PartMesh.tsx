@@ -15,8 +15,10 @@ interface Props {
   dimmed: boolean;
   hovered: boolean;
   showLabel: boolean;
-  /** World-space offset applied for the exploded view (already scaled by the slider). */
-  explodeOffset: THREE.Vector3;
+  /** Unit direction and full distance of the exploded-view offset; scaled by `exploded` (0..1) per frame. */
+  explodeDir: THREE.Vector3;
+  explodeDist: number;
+  exploded: number;
   /** Direction (unit vector) + distance the part slides in from while entering. */
   introDir: THREE.Vector3;
   introDistance: number;
@@ -47,7 +49,7 @@ function easeOutCubic(t: number): number {
 }
 
 function PartMeshImpl(props: Props) {
-  const { instance, component, state, highlighted, dimmed, hovered, showLabel, explodeOffset, introDir, introDistance, introStartedAt, onHover, onClick } = props;
+  const { instance, component, state, highlighted, dimmed, hovered, showLabel, explodeDir, explodeDist, exploded, introDir, introDistance, introStartedAt, onHover, onClick } = props;
   const mesh = useRef<THREE.Mesh>(null);
   const matRef = useRef<THREE.MeshStandardMaterial>(null);
   const geometry = useMemo(() => geometryFor(component), [component]);
@@ -70,7 +72,7 @@ function PartMeshImpl(props: Props) {
     const mat = matRef.current;
     if (!m || !mat) return;
     // Position: final + explode offset, plus the slide-in while entering.
-    tmp.copy(finalPos).add(explodeOffset);
+    tmp.copy(finalPos).addScaledVector(explodeDir, explodeDist * exploded);
     let intro = 1;
     if (state === "entering") {
       const t = Math.min(1, (performance.now() - introStartedAt) / INTRO_MS);

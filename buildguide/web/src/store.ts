@@ -216,6 +216,9 @@ export const useStore = create<State>((set, get) => ({
       if (!current()) return;
       set((s) => ({ chat: s.chat.map((m) => (m.id === reply.id ? { ...m, ...p } : m)) }));
     };
+    // Set once the stream delivered a terminal event; a stream that ends without
+    // one (server killed, proxy cut the response) must not leave an empty bubble.
+    let settled = false;
     try {
       await api.chat(project.id, history, get().stepIndex, (ev) => {
         if (!current()) return;
@@ -232,14 +235,21 @@ export const useStore = create<State>((set, get) => ({
           const placeholder = entry?.actions?.length
             ? "I've updated the 3D view for you."
             : "I couldn't come up with an answer to that. Try rephrasing.";
+          settled = true;
           patch({ content: text.trim() ? text : placeholder, streaming: false });
         } else if (ev.type === "error") {
+          settled = true;
           patch({ error: ev.message, streaming: false });
         }
       }, controller.signal);
     } catch (e) {
+      settled = true;
       if (!controller.signal.aborted) patch({ error: e instanceof Error ? e.message : String(e), streaming: false });
     } finally {
+      if (!settled && current()) {
+        const entry = get().chat.find((m) => m.id === reply.id);
+        patch({ error: entry?.content?.trim() ? "The connection dropped before the answer finished." : "The connection dropped before an answer arrived.", streaming: false });
+      }
       patch({ streaming: false });
       if (current()) set({ chatBusy: false });
       if (activeChat === controller) activeChat = null;

@@ -26,6 +26,7 @@ export function ProjectPage({ id, chatBackend, onHome }: Props) {
     let cancelled = false;
     let unsubscribe: (() => void) | null = null;
     setError(null);
+    setStatus(null);
     const fetchFull = async () => {
       try {
         const p = await api.getProject(id);

@@ -27,9 +27,11 @@ export function StepCard({ onSpeak, onStop, speaking, ttsSupported }: Props) {
   const instancesOf = useMemo(() => instancesByComponent(plan), [plan]);
   const step = plan.steps[stepIndex];
   if (!step) return null;
-  // Same selection rule as the server uses when attaching the manual to chat.
+  // Prefer the PDF the chat assistant is reading (same rule as the server); when
+  // nothing is attached, link to the most likely manual among all PDFs.
   const pdfs = pdfSources(project.sources);
-  const manualOrdinal = pickManualIndex(project.sources);
+  const attachedOrdinal = pickManualIndex(project.sources, { attachedOnly: true });
+  const manualOrdinal = attachedOrdinal >= 0 ? attachedOrdinal : pickManualIndex(project.sources);
   const manual = manualOrdinal >= 0 ? pdfs[manualOrdinal] : undefined;
   const manualPages = manual ? step.manualPages.filter((p) => !manual.pages || p <= manual.pages) : [];
   const isLast = stepIndex === plan.steps.length - 1;
