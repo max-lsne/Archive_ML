@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AssemblyPlanSchema, describeHardware, instanceStepIndex, normalizePlan, planBounds, visibleInstanceIds } from "../shared/plan";
+import { AssemblyPlanSchema, describeHardware, instanceStepIndex, normalizePlan, visibleInstanceIds } from "../shared/plan";
 import { SAMPLE_PLANS } from "../shared/samples/index";
 
 describe("sample plans", () => {
@@ -60,6 +60,22 @@ describe("normalizePlan", () => {
     expect(plan.steps[0].addInstances).toEqual(["x"]);
   });
 
+  it("resolves hardware referenced by manual label or name", () => {
+    const plan = normalizePlan({
+      components: [
+        { id: "cam_lock", label: "100383", name: "Cam lock", isHardware: true },
+        { id: "side_panel", label: "A", name: "Side panel" },
+      ],
+      instances: [{ id: "s1", componentId: "A" }],
+      steps: [{ title: "s", addInstances: ["s1"], hardware: [{ componentId: "100383", qty: 4 }, { componentId: "Cam lock", qty: 2 }, { componentId: "nope", qty: 1 }] }],
+    });
+    expect(plan.steps[0].hardware).toEqual([
+      { componentId: "cam_lock", qty: 4 },
+      { componentId: "cam_lock", qty: 2 },
+    ]);
+    expect(plan.instances[0].componentId).toBe("side_panel");
+  });
+
   it("accepts short and bare hex colours", () => {
     const plan = normalizePlan({ components: [{ id: "a", color: "#abc" }, { id: "b", color: "aabbcc" }, { id: "c", material: "metal" }] });
     expect(plan.components.map((c) => c.color)).toEqual(["#aabbcc", "#aabbcc", "#b8bec7"]);
@@ -78,11 +94,6 @@ describe("derived state", () => {
   it("instanceStepIndex maps every instance", () => {
     const m = instanceStepIndex(plan);
     expect(m.size).toBe(plan.instances.length);
-  });
-  it("planBounds spans the product", () => {
-    const b = planBounds(plan);
-    expect(b.size[1]).toBeGreaterThan(150);
-    expect(b.center[0]).toBeCloseTo(0, 0);
   });
   it("describeHardware lists quantities", () => {
     const step = plan.steps.find((s) => s.hardware.length)!;

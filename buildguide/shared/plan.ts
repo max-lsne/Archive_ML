@@ -211,7 +211,7 @@ function strArray(v: unknown): string[] {
   return v.filter((x) => typeof x === "string" && x.trim().length > 0);
 }
 
-export function vec3(v: unknown, fallback: [number, number, number]): [number, number, number] {
+function vec3(v: unknown, fallback: [number, number, number]): [number, number, number] {
   if (Array.isArray(v)) {
     return [num(v[0], fallback[0]), num(v[1], fallback[1]), num(v[2], fallback[2])];
   }
@@ -334,6 +334,16 @@ export function normalizePlan(input: unknown): AssemblyPlan {
     });
   }
 
+  /** Resolve a reference that may be a component id, a manual label or a name. */
+  const resolveComponentId = (ref: string): string | null => {
+    const asId = slug(ref, "");
+    if (asId && byComponent.has(asId)) return asId;
+    const needle = ref.trim().toLowerCase();
+    if (!needle) return null;
+    const hit = components.find((c) => c.label.toLowerCase() === needle || c.name.toLowerCase() === needle);
+    return hit ? hit.id : null;
+  };
+
   // Steps
   const steps: Step[] = [];
   const added = new Set<string>();
@@ -350,9 +360,9 @@ export function normalizePlan(input: unknown): AssemblyPlan {
     const hardware = (Array.isArray(s.hardware) ? s.hardware : [])
       .map((h0) => {
         const h = (h0 && typeof h0 === "object" ? h0 : {}) as Record<string, unknown>;
-        return { componentId: slug(str(h.componentId), ""), qty: Math.max(1, Math.round(num(h.qty, 1))) };
+        return { componentId: resolveComponentId(str(h.componentId)), qty: Math.max(1, Math.round(num(h.qty, 1))) };
       })
-      .filter((h) => byComponent.has(h.componentId));
+      .filter((h): h is { componentId: string; qty: number } => h.componentId !== null);
     steps.push({
       id: i + 1,
       title: str(s.title, `Step ${i + 1}`),
@@ -450,51 +460,6 @@ export function visibleInstanceIds(plan: AssemblyPlan, stepIndex: number): Set<s
     for (const id of plan.steps[i].addInstances) out.add(id);
   }
   return out;
-}
-
-export interface Bounds {
-  min: [number, number, number];
-  max: [number, number, number];
-  center: [number, number, number];
-  size: [number, number, number];
-  radius: number;
-}
-
-/** Rotation-agnostic bounds (uses each part's bounding sphere). */
-export function planBounds(plan: AssemblyPlan, ids?: Iterable<string>): Bounds {
-  const byComponent = componentMap(plan);
-  const wanted = ids ? new Set(ids) : null;
-  const min: [number, number, number] = [Infinity, Infinity, Infinity];
-  const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
-  let any = false;
-  for (const inst of plan.instances) {
-    if (wanted && !wanted.has(inst.id)) continue;
-    const c = byComponent.get(inst.componentId);
-    if (!c) continue;
-    const r = Math.hypot(c.size[0], c.size[1], c.size[2]) / 2;
-    for (let k = 0; k < 3; k++) {
-      min[k] = Math.min(min[k], inst.position[k] - r);
-      max[k] = Math.max(max[k], inst.position[k] + r);
-    }
-    any = true;
-  }
-  if (!any) {
-    const s = plan.product.assembledSize;
-    return {
-      min: [-s[0] / 2, 0, -s[2] / 2],
-      max: [s[0] / 2, s[1], s[2] / 2],
-      center: [0, s[1] / 2, 0],
-      size: [s[0], s[1], s[2]],
-      radius: Math.hypot(s[0], s[1], s[2]) / 2,
-    };
-  }
-  const size: [number, number, number] = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
-  const center: [number, number, number] = [
-    (min[0] + max[0]) / 2,
-    (min[1] + max[1]) / 2,
-    (min[2] + max[2]) / 2,
-  ];
-  return { min, max, center, size, radius: Math.hypot(size[0], size[1], size[2]) / 2 };
 }
 
 /** Text summary of a step's hardware, e.g. "8 × cam lock, 4 × wood dowel". */
