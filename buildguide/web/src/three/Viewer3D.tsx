@@ -104,6 +104,7 @@ export function Viewer3D() {
         <Suspense fallback={null}>
           <Assembly
             plan={plan}
+            bounds={bounds}
             stepIndex={stepIndex}
             highlighted={highlighted}
             hovered={hovered}

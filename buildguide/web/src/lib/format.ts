@@ -1,7 +1,8 @@
 export function minutes(n: number): string {
-  if (n < 60) return `${Math.round(n)} min`;
-  const h = Math.floor(n / 60);
-  const m = Math.round(n % 60);
+  const r = Math.round(n);
+  if (r < 60) return `${r} min`;
+  const h = Math.floor(r / 60);
+  const m = r % 60;
   return m ? `${h} h ${m} min` : `${h} h`;
 }
 

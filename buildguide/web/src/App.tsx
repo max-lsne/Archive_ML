@@ -26,7 +26,7 @@ export default function App() {
 
   const m = path.match(/^\/p\/([A-Za-z0-9_-]+)/);
   if (m) {
-    return <ProjectPage id={m[1]} live={config?.liveGeneration ?? false} onHome={() => navigate("/")} />;
+    return <ProjectPage id={m[1]} chatBackend={config?.chatBackend ?? "demo"} onHome={() => navigate("/")} />;
   }
   return <Home config={config} onOpen={(id) => navigate(`/p/${id}`)} />;
 }

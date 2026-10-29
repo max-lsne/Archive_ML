@@ -2,16 +2,7 @@ import { useStore } from "../store";
 import { api } from "../api";
 import { minutes } from "../lib/format";
 import { componentMap, instancesByComponent } from "../../../shared/plan";
-import type { SourceDoc } from "../../../shared/project";
-
-/** Index (among PDF sources) of the PDF most likely to be the assembly manual: attached to Claude, most pages. */
-export function pickManualOrdinal(pdfs: SourceDoc[]): number {
-  if (!pdfs.length) return -1;
-  const indexed = pdfs.map((s, i) => ({ s, i }));
-  const eligible = indexed.filter(({ s }) => s.sentAsDocument !== false);
-  const pool = eligible.length ? eligible : indexed;
-  return pool.reduce((best, cur) => ((cur.s.pages ?? 0) > (best.s.pages ?? 0) ? cur : best), pool[0]).i;
-}
+import { pickManualIndex } from "../../../shared/project";
 
 interface Props {
   onSpeak: () => void;
@@ -34,8 +25,9 @@ export function StepCard({ onSpeak, onStop, speaking, ttsSupported }: Props) {
   if (!step) return null;
   const components = componentMap(plan);
   const instancesOf = instancesByComponent(plan);
+  // Same selection rule as the server uses when attaching the manual to chat.
   const pdfSources = project.sources.filter((s) => s.kind === "pdf");
-  const manualOrdinal = pickManualOrdinal(pdfSources);
+  const manualOrdinal = pickManualIndex(project.sources);
   const manual = manualOrdinal >= 0 ? pdfSources[manualOrdinal] : undefined;
   const manualPages = manual ? step.manualPages.filter((p) => !manual.pages || p <= manual.pages) : [];
   const isLast = stepIndex === plan.steps.length - 1;

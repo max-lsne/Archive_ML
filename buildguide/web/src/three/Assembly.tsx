@@ -3,10 +3,11 @@ import * as THREE from "three";
 import type { AssemblyPlan } from "../../../shared/plan";
 import { componentMap, instanceStepIndex } from "../../../shared/plan";
 import { PartMesh, type PartState } from "./PartMesh";
-import { tightBounds } from "./geometry";
 
 interface Props {
   plan: AssemblyPlan;
+  /** Bounds of the structural parts, computed once by the viewer and shared with the camera rig. */
+  bounds: THREE.Box3;
   stepIndex: number;
   highlighted: string[];
   hovered: string | null;
@@ -22,15 +23,9 @@ interface Props {
  * placed (added earlier), entering (added this step, animates in), future
  * (ghosted or hidden).
  */
-export function Assembly({ plan, stepIndex, highlighted, hovered, exploded, ghostFuture, showLabels, onHover, onClick }: Props) {
+export function Assembly({ plan, bounds, stepIndex, highlighted, hovered, exploded, ghostFuture, showLabels, onHover, onClick }: Props) {
   const components = useMemo(() => componentMap(plan), [plan]);
   const stepOf = useMemo(() => instanceStepIndex(plan), [plan]);
-  const bounds = useMemo(() => {
-    const full = plan.instances
-      .map((i) => ({ ...i, size: components.get(i.componentId)?.size ?? [10, 10, 10] }))
-      .filter((i) => !(components.get(i.componentId)?.isHardware ?? false));
-    return tightBounds(full.length ? full : plan.instances.map((i) => ({ ...i, size: components.get(i.componentId)?.size ?? [10, 10, 10] })));
-  }, [plan, components]);
   const center = useMemo(() => bounds.getCenter(new THREE.Vector3()), [bounds]);
   const radius = useMemo(() => bounds.getSize(new THREE.Vector3()).length() / 2, [bounds]);
 

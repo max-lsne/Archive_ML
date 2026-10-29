@@ -46,6 +46,8 @@ export function useVoice() {
   voiceRef.current = voice;
   const startListeningRef = useRef<() => void>(() => {});
   const dispatchRef = useRef<(cmd: VoiceCommand) => void>(() => {});
+  /** Settles an in-flight push-to-talk promise when speech interrupts it (Recognizer.stop() never fires onend). */
+  const listenOnceInterruptRef = useRef<(() => void) | null>(null);
 
   const scheduleListen = useCallback((delay: number) => {
     if (restartTimer.current) window.clearTimeout(restartTimer.current);
@@ -59,8 +61,9 @@ export function useVoice() {
   const say = useCallback(
     (text: string) => {
       if (!supported.tts || !text.trim()) return;
-      // Pause the microphone so we don't transcribe ourselves.
-      if (handsFreeRef.current) recognizer.stop();
+      // Pause the microphone so we don't transcribe ourselves (hands-free or push-to-talk).
+      if (recognizer.active) recognizer.stop();
+      listenOnceInterruptRef.current?.();
       speakingRef.current = true;
       setVoiceStatus("speaking");
       speak(text, {
@@ -248,6 +251,16 @@ export function useVoice() {
       cancelSpeech();
       let finalText = "";
       let interim = "";
+      let settled = false;
+      const settle = (text: string) => {
+        if (settled) return;
+        settled = true;
+        listenOnceInterruptRef.current = null;
+        setVoiceStatus(wasHandsFree ? "listening" : "idle");
+        if (wasHandsFree) scheduleListen(300);
+        resolve(text);
+      };
+      listenOnceInterruptRef.current = () => settle(finalText || interim);
       setVoiceStatus("listening");
       const ok = recognizer.start({
         continuous: false,
@@ -256,18 +269,14 @@ export function useVoice() {
           else interim = text;
           setLastHeard(finalText || interim);
         },
-        onEnd: () => {
-          setVoiceStatus(wasHandsFree ? "listening" : "idle");
-          if (wasHandsFree) scheduleListen(300);
-          resolve(finalText || interim);
-        },
+        onEnd: () => settle(finalText || interim),
         onError: (err) => {
           const message = FATAL_STT_ERRORS[err];
           if (message) setLastHeard(message);
-          resolve(finalText || interim);
+          settle(finalText || interim);
         },
       });
-      if (!ok) resolve("");
+      if (!ok) settle("");
     });
   }, [recognizer, supported.stt, cancelSpeech, scheduleListen, setLastHeard, setVoiceStatus]);
 

@@ -5,6 +5,8 @@ export interface AppConfig {
   hasApiKey: boolean;
   mock: boolean;
   liveGeneration: boolean;
+  /** Who answers chat for non-demo projects; absent on older servers (treated as "demo"). */
+  chatBackend?: "claude" | "demo";
   model: string;
   effort: string;
   samples: { id: string; title: string; blurb: string; steps: number; category: string }[];

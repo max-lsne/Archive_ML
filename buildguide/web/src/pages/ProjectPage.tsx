@@ -7,13 +7,14 @@ import { Workspace } from "../components/Workspace";
 
 interface Props {
   id: string;
-  live: boolean;
+  /** Reported by the server: "claude" only when chat really goes to Claude. */
+  chatBackend: "claude" | "demo";
   onHome: () => void;
 }
 
 type Status = Omit<Project, "plan"> & { hasPlan?: boolean };
 
-export function ProjectPage({ id, live, onHome }: Props) {
+export function ProjectPage({ id, chatBackend, onHome }: Props) {
   const [status, setStatus] = useState<Status | null>(null);
   const [error, setError] = useState<string | null>(null);
   const project = useStore((s) => s.project);
@@ -88,7 +89,7 @@ export function ProjectPage({ id, live, onHome }: Props) {
       </div>
     );
   }
-  if (loaded) return <Workspace live={live && !project?.demo} onNavigateHome={onHome} />;
+  if (loaded) return <Workspace live={chatBackend === "claude" && !project?.demo} onNavigateHome={onHome} />;
   if (status) return <Progress project={status} onRetry={retry} onHome={onHome} />;
   return (
     <div className="progress-page">
