@@ -61,7 +61,6 @@ function chunk(text: string): string[] {
 interface SpeakOptions {
   rate?: number;
   voiceURI?: string | null;
-  onStart?: () => void;
   onEnd?: () => void;
 }
 
@@ -83,7 +82,6 @@ export function speak(text: string, opts: SpeakOptions = {}): () => void {
   }
   const voices = getVoices();
   const voice = (opts.voiceURI && voices.find((v) => v.voiceURI === opts.voiceURI)) || pickDefaultVoice(voices);
-  let started = false;
   let remaining = parts.length;
   const finish = () => {
     if (token !== activeToken) return;
@@ -98,12 +96,6 @@ export function speak(text: string, opts: SpeakOptions = {}): () => void {
     }
     u.rate = Math.min(2, Math.max(0.5, opts.rate ?? 1));
     u.pitch = 1;
-    u.onstart = () => {
-      if (!started && token === activeToken) {
-        started = true;
-        opts.onStart?.();
-      }
-    };
     u.onend = finish;
     u.onerror = finish;
     synth.speak(u);
@@ -130,8 +122,4 @@ export function stopSpeaking(): void {
   if (!ttsSupported()) return;
   activeToken++;
   window.speechSynthesis.cancel();
-}
-
-export function isSpeaking(): boolean {
-  return ttsSupported() && window.speechSynthesis.speaking;
 }

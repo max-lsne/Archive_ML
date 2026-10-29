@@ -99,13 +99,13 @@ export function useVoice() {
   }, [say]);
 
   // Speak the step whenever the user navigates (speakNonce bumps) if enabled.
-  const firstNonce = useRef(true);
+  // Tracking the last spoken nonce (initialised to the mount value) keeps the
+  // page quiet on load, including under StrictMode's double effect run.
+  const lastSpokenNonce = useRef(speakNonce);
   useEffect(() => {
     if (!plan) return;
-    if (firstNonce.current) {
-      firstNonce.current = false;
-      return; // don't talk the moment the page opens
-    }
+    if (lastSpokenNonce.current === speakNonce) return;
+    lastSpokenNonce.current = speakNonce;
     if (voiceRef.current.speakSteps) speakCurrentStep();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [speakNonce]);
@@ -216,7 +216,15 @@ export function useVoice() {
         }
       },
     });
-    setVoiceStatus(ok ? "listening" : "idle");
+    if (ok) {
+      setVoiceStatus("listening");
+    } else {
+      // start() can throw right after an abort (Chrome's InvalidStateError);
+      // treat it like an idle end and retry with the same backoff.
+      idleEnds.current += 1;
+      const delay = Math.min(RESTART_MAX_MS, RESTART_BASE_MS * 2 ** Math.max(0, idleEnds.current - 1));
+      scheduleListen(delay);
+    }
   }, [recognizer, supported.stt, scheduleListen, setLastHeard, setVoiceStatus]);
   startListeningRef.current = startListening;
 

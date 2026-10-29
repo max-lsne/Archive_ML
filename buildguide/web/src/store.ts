@@ -44,7 +44,7 @@ interface State {
   mobilePane: "steps" | "viewer" | "chat";
 
   loadProject: (p: Project) => void;
-  setStep: (index: number, opts?: { speak?: boolean; keepHighlights?: boolean }) => void;
+  setStep: (index: number, opts?: { speak?: boolean; keepHighlights?: boolean; force?: boolean }) => void;
   nextStep: () => void;
   prevStep: () => void;
   toggleCompleted: (stepId: number) => void;
@@ -127,11 +127,15 @@ export const useStore = create<State>((set, get) => ({
     const { plan } = get();
     if (!plan) return;
     const i = Math.max(0, Math.min(plan.steps.length - 1, index));
+    // Already there (e.g. Next on the last step): don't re-read or re-fly.
+    if (i === get().stepIndex && !opts?.force) return;
+    const hint = plan.steps[i].cameraHint;
     set((s) => ({
       stepIndex: i,
       highlighted: opts?.keepHighlights ? s.highlighted : [],
       selected: opts?.keepHighlights ? s.selected : null,
-      view: plan.steps[i].cameraHint === "auto" ? s.view : plan.steps[i].cameraHint,
+      // "auto" keeps the user's current angle; CameraRig only re-frames.
+      view: hint === "auto" ? null : hint,
       viewNonce: s.viewNonce + 1,
       speakNonce: opts?.speak === false ? s.speakNonce : s.speakNonce + 1,
     }));
@@ -198,7 +202,14 @@ export const useStore = create<State>((set, get) => ({
           get().applyAction(ev.action);
           set((s) => ({ chat: s.chat.map((m) => (m.id === reply.id ? { ...m, actions: [...(m.actions ?? []), ev.action] } : m)) }));
         } else if (ev.type === "done") {
-          patch({ content: ev.text || get().chat.find((m) => m.id === reply.id)?.content || "", streaming: false });
+          const current = get().chat.find((m) => m.id === reply.id);
+          const text = ev.text || current?.content || "";
+          // An empty reply would be dropped from the history sent back to the
+          // server, merging two user turns; keep a short placeholder instead.
+          const placeholder = current?.actions?.length
+            ? "I've updated the 3D view for you."
+            : "I couldn't come up with an answer to that. Try rephrasing.";
+          patch({ content: text.trim() ? text : placeholder, streaming: false });
         } else if (ev.type === "error") {
           patch({ error: ev.message, streaming: false });
         }
@@ -225,5 +236,3 @@ export const useStore = create<State>((set, get) => ({
   setLastHeard: (lastHeard) => set({ lastHeard }),
   setMobilePane: (mobilePane) => set({ mobilePane }),
 }));
-
-export const selectCurrentStep = (s: State) => (s.plan ? s.plan.steps[s.stepIndex] : undefined);

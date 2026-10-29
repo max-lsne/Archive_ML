@@ -61,7 +61,8 @@ export function Assembly({ plan, bounds, stepIndex, highlighted, hovered, explod
       const explodeDist = Math.min(radius * 0.9, out.length() * 0.9 + (comp?.isHardware ? 6 : 14));
       const dir = insertDir ?? explodeDir;
       const introDistance = Math.max(25, radius * 0.5);
-      const explodeOffset = explodeDir.multiplyScalar(explodeDist * exploded);
+      // Clone: `dir` may alias explodeDir and must stay a unit vector.
+      const explodeOffset = explodeDir.clone().multiplyScalar(explodeDist * exploded);
       return { inst, comp, explodeOffset, dir, introDistance };
     });
   }, [plan, components, center, radius, insertDir, exploded]);
