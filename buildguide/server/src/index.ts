@@ -9,6 +9,7 @@ import { SseWriter } from "./sse.js";
 import {
   deleteProject,
   getProject,
+  isDeleted,
   listProjects,
   onProjectChange,
   readManual,
@@ -99,21 +100,36 @@ app.post("/api/projects/sample", async (req, res) => {
   res.status(201).json({ id: project.id });
 });
 
+/** Thrown inside the pipeline when the user deleted the project mid-flight. */
+class ProjectDeleted extends Error {
+  constructor() {
+    super("project deleted");
+  }
+}
+
 async function runPipeline(project: Project): Promise<void> {
+  const checkAlive = () => {
+    if (isDeleted(project.id)) throw new ProjectDeleted();
+  };
   const update = async (patch: Partial<Project>, persist = false) => {
+    checkAlive();
     Object.assign(project, patch);
     if (persist) await saveProject(project);
     else touchProject(project);
   };
   try {
     await update({ status: "fetching", progress: "Fetching the link…" });
-    const gathered = await gatherDocumentation(project.url, (message) => void update({ progress: message }));
+    const gathered = await gatherDocumentation(project.url, (message) => {
+      if (!isDeleted(project.id)) void update({ progress: message });
+    });
+    checkAlive();
     for (const [i, pdf] of gathered.pdfs.entries()) await saveManual(project.id, i, pdf.bytes);
     await update({ sources: gathered.sources, imageUrl: gathered.imageUrl, status: "analyzing", progress: "Analysing the documentation…" }, true);
 
     const result = await planner.generate(gathered, project.notes, (message, chars) => {
-      void update({ progress: message, progressChars: chars });
+      if (!isDeleted(project.id)) void update({ progress: message, progressChars: chars });
     });
+    checkAlive();
     for (const [i, sent] of result.sentAsDocument.entries()) {
       const src = project.sources.filter((s) => s.kind === "pdf")[i];
       if (src) src.sentAsDocument = sent;
@@ -121,9 +137,13 @@ async function runPipeline(project: Project): Promise<void> {
     await update({ status: "ready", progress: "Ready", plan: result.plan, usage: result.usage, progressChars: undefined }, true);
     log.info(`project ${project.id} ready: ${result.plan.product.name}`);
   } catch (err) {
+    if (err instanceof ProjectDeleted || isDeleted(project.id)) {
+      log.info(`project ${project.id} was deleted while it was being built; stopping.`);
+      return;
+    }
     const message = err instanceof FetchError ? err.message : err instanceof Error ? err.message : String(err);
     log.error(`project ${project.id} failed:`, message);
-    await update({ status: "error", error: message, progress: "Failed" }, true);
+    await update({ status: "error", error: message, progress: "Failed" }, true).catch(() => {});
   }
 }
 
@@ -194,7 +214,8 @@ app.post("/api/projects/:id/chat", async (req, res) => {
     if (pdfIndex >= 0) {
       const pdfOrdinal = p.sources.filter((s) => s.kind === "pdf").findIndex((s) => s === p.sources[pdfIndex]);
       const bytes = await readManual(p.id, pdfOrdinal);
-      if (bytes) ctx.manual = { title: p.sources[pdfIndex].title, bytes };
+      // Same payload rule as the planner: a PDF that doesn't fit the request stays out.
+      if (bytes && bytes.length <= config.maxAttachPdfBytes) ctx.manual = { title: p.sources[pdfIndex].title, bytes };
     }
   }
   try {

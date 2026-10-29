@@ -5,8 +5,14 @@ import { config } from "./config.js";
 import type { Project, ProjectSummary } from "../../shared/project.js";
 
 const projects = new Map<string, Project>();
+/** Ids deleted while a pipeline may still be running; writes for them are dropped. */
+const tombstones = new Set<string>();
 const emitter = new EventEmitter();
 emitter.setMaxListeners(200);
+
+export function isDeleted(id: string): boolean {
+  return tombstones.has(id);
+}
 
 function projectDir(id: string): string {
   return path.join(config.dataDir, "projects", id);
@@ -20,27 +26,35 @@ export function isValidId(id: string): boolean {
   return /^[a-zA-Z0-9_-]{4,64}$/.test(id);
 }
 
-export async function saveProject(p: Project): Promise<void> {
+/** Persist a project. Returns false (and writes nothing) if it was deleted meanwhile. */
+export async function saveProject(p: Project): Promise<boolean> {
+  if (tombstones.has(p.id)) return false;
   p.updatedAt = new Date().toISOString();
   projects.set(p.id, p);
   emitter.emit(`project:${p.id}`, p);
   await fs.mkdir(projectDir(p.id), { recursive: true });
   const tmp = projectFile(p.id) + ".tmp";
   await fs.writeFile(tmp, JSON.stringify(p, null, 2));
+  if (tombstones.has(p.id)) {
+    // Deleted while we were writing: don't leave the directory behind.
+    await fs.rm(projectDir(p.id), { recursive: true, force: true }).catch(() => {});
+    return false;
+  }
   await fs.rename(tmp, projectFile(p.id));
+  return true;
 }
 
 /** Update in-memory state and notify listeners without hitting disk (for frequent progress ticks). */
-export function touchProject(p: Project): void {
+export function touchProject(p: Project): boolean {
+  if (tombstones.has(p.id)) return false;
   p.updatedAt = new Date().toISOString();
   projects.set(p.id, p);
   emitter.emit(`project:${p.id}`, p);
+  return true;
 }
 
-export async function getProject(id: string): Promise<Project | undefined> {
-  if (!isValidId(id)) return undefined;
-  const cached = projects.get(id);
-  if (cached) return cached;
+/** Read a project file without touching the in-memory cache. */
+async function readProjectFile(id: string): Promise<Project | undefined> {
   try {
     const raw = await fs.readFile(projectFile(id), "utf8");
     const p = JSON.parse(raw) as Project;
@@ -49,11 +63,19 @@ export async function getProject(id: string): Promise<Project | undefined> {
       p.status = "error";
       p.error = "The server restarted while this project was being analysed. Please create it again.";
     }
-    projects.set(id, p);
     return p;
   } catch {
     return undefined;
   }
+}
+
+export async function getProject(id: string): Promise<Project | undefined> {
+  if (!isValidId(id) || tombstones.has(id)) return undefined;
+  const cached = projects.get(id);
+  if (cached) return cached;
+  const p = await readProjectFile(id);
+  if (p) projects.set(id, p);
+  return p;
 }
 
 export async function listProjects(): Promise<ProjectSummary[]> {
@@ -64,9 +86,12 @@ export async function listProjects(): Promise<ProjectSummary[]> {
   } catch {
     /* no data yet */
   }
+  // Summaries only: don't pull every plan into the long-lived cache.
+  const loaded = await Promise.all(
+    ids.filter((id) => isValidId(id) && !tombstones.has(id)).map(async (id) => projects.get(id) ?? (await readProjectFile(id))),
+  );
   const out: ProjectSummary[] = [];
-  for (const id of ids) {
-    const p = await getProject(id);
+  for (const p of loaded) {
     if (!p) continue;
     out.push({
       id: p.id,
@@ -83,10 +108,12 @@ export async function listProjects(): Promise<ProjectSummary[]> {
 
 export async function deleteProject(id: string): Promise<boolean> {
   if (!isValidId(id)) return false;
+  const existed = projects.has(id) || Boolean(await readProjectFile(id));
+  tombstones.add(id);
   projects.delete(id);
   try {
     await fs.rm(projectDir(id), { recursive: true, force: true });
-    return true;
+    return existed;
   } catch {
     return false;
   }
@@ -98,7 +125,8 @@ export function onProjectChange(id: string, cb: (p: Project) => void): () => voi
   return () => emitter.off(key, cb);
 }
 
-export async function saveManual(id: string, index: number, bytes: Buffer): Promise<string> {
+export async function saveManual(id: string, index: number, bytes: Buffer): Promise<string | undefined> {
+  if (tombstones.has(id)) return undefined;
   await fs.mkdir(projectDir(id), { recursive: true });
   const file = path.join(projectDir(id), `manual-${index}.pdf`);
   await fs.writeFile(file, bytes);
@@ -106,7 +134,7 @@ export async function saveManual(id: string, index: number, bytes: Buffer): Prom
 }
 
 export async function readManual(id: string, index: number): Promise<Buffer | undefined> {
-  if (!isValidId(id)) return undefined;
+  if (!isValidId(id) || tombstones.has(id)) return undefined;
   try {
     return await fs.readFile(path.join(projectDir(id), `manual-${index}.pdf`));
   } catch {

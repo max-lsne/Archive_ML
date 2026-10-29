@@ -27,6 +27,10 @@ export const config = {
   /** Allow links to localhost / private networks (for testing against a local web server). */
   allowPrivateUrls: process.env.BUILDGUIDE_ALLOW_PRIVATE_URLS === "1",
   maxPdfBytes: 30 * 1024 * 1024,
+  /** Largest raw PDF handed to Claude as a document block (base64 expands it by 4/3). */
+  maxAttachPdfBytes: 20 * 1024 * 1024,
+  /** Budget for all base64 document/image payload in one request (API limit is 32 MB total). */
+  maxRequestBytes: 28 * 1024 * 1024,
   maxPdfPages: 150,
   maxPageTextChars: 40_000,
   maxPdfTextChars: 60_000,

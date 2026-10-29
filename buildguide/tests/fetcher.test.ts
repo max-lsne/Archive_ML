@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeUrl, parseHtml, scorePdfCandidate } from "../server/src/fetcher";
+import { hostIsPrivateLiteral, isPrivateAddress, normalizeUrl, parseHtml, rankPdfCandidates, scorePdfCandidate } from "../server/src/fetcher";
 import { parseLooseJson } from "../server/src/planner";
 
 describe("parseHtml", () => {
@@ -40,8 +40,72 @@ describe("scorePdfCandidate", () => {
 describe("normalizeUrl", () => {
   it("adds https and rejects junk", () => {
     expect(normalizeUrl("ikea.com/x").toString()).toBe("https://ikea.com/x");
-    expect(() => normalizeUrl("ftp://x")).toThrow();
+    expect(() => normalizeUrl("ftp://x")).toThrow("Only http(s) links are supported.");
+    expect(() => normalizeUrl("mailto:bob@example.com")).toThrow("Only http(s) links are supported.");
     expect(() => normalizeUrl("not a url")).toThrow();
+  });
+  it("treats host:port as a host, not a scheme", () => {
+    expect(normalizeUrl("example.com:8080/manual.pdf").toString()).toBe("https://example.com:8080/manual.pdf");
+    expect(normalizeUrl("www.ikea.com:443/x").toString()).toBe("https://www.ikea.com/x");
+    expect(normalizeUrl("http://example.com:8080/a").toString()).toBe("http://example.com:8080/a");
+  });
+});
+
+describe("private-host detection", () => {
+  it("flags private IPv4 and IPv6 ranges", () => {
+    for (const ip of ["127.0.0.1", "10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.1.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "::1", "::", "fd00::1", "fc00::1", "fe80::1"]) {
+      expect(isPrivateAddress(ip), ip).toBe(true);
+    }
+    for (const ip of ["8.8.8.8", "172.32.0.1", "100.128.0.1", "2606:4700::1111"]) {
+      expect(isPrivateAddress(ip), ip).toBe(false);
+    }
+  });
+  it("judges IPv4-mapped IPv6 by the embedded address", () => {
+    expect(isPrivateAddress("::ffff:127.0.0.1")).toBe(true);
+    expect(isPrivateAddress("::ffff:7f00:1")).toBe(true);
+    expect(isPrivateAddress("::ffff:8.8.8.8")).toBe(false);
+    expect(isPrivateAddress("::ffff:808:808")).toBe(false);
+  });
+  it("sees through bracketed IPv6 literals and local names", () => {
+    expect(hostIsPrivateLiteral("[::1]")).toBe(true);
+    expect(hostIsPrivateLiteral("[::ffff:7f00:1]")).toBe(true);
+    expect(hostIsPrivateLiteral("[fd00::1]")).toBe(true);
+    expect(hostIsPrivateLiteral("[2606:4700::1111]")).toBe(false);
+    expect(hostIsPrivateLiteral("127.0.0.1")).toBe(true);
+    expect(hostIsPrivateLiteral("localhost")).toBe(true);
+    expect(hostIsPrivateLiteral("api.localhost")).toBe(true);
+    expect(hostIsPrivateLiteral("printer.local")).toBe(true);
+    expect(hostIsPrivateLiteral("db.internal")).toBe(true);
+    // DNS names are undecided here (resolved later)
+    expect(hostIsPrivateLiteral("www.ikea.com")).toBeNull();
+  });
+  it("new URL keeps IPv6 brackets in hostname (the bug this guards against)", () => {
+    expect(new URL("http://[::1]:8787/x").hostname).toBe("[::1]");
+  });
+});
+
+describe("rankPdfCandidates", () => {
+  it("puts real .pdf links ahead of higher-scoring HTML pages", () => {
+    const ranked = rankPdfCandidates([
+      { url: "https://x.com/assembly-instructions", text: "Assembly instructions", score: 9 },
+      { url: "https://x.com/install-guide", text: "Installation guide", score: 9 },
+      { url: "https://x.com/docs/aa-1234567-8.pdf", text: "", score: 8 },
+      { url: "https://x.com/docs/other.pdf?v=2", text: "", score: 2 },
+    ]);
+    expect(ranked.map((c) => c.url)).toEqual([
+      "https://x.com/docs/aa-1234567-8.pdf",
+      "https://x.com/docs/other.pdf?v=2",
+      "https://x.com/assembly-instructions",
+      "https://x.com/install-guide",
+    ]);
+  });
+  it("parseHtml returns candidates already ranked that way", () => {
+    const page = parseHtml(
+      `<a href="/assembly-instructions">Assembly instructions</a><a href="/warranty.pdf">Warranty</a><a href="/aa-55555-1.pdf"><img src="/i.png"></a>`,
+      "https://x.com/p/1",
+    );
+    expect(page.pdfCandidates[0].url).toBe("https://x.com/aa-55555-1.pdf");
+    expect(page.pdfCandidates.every((c, i, arr) => i === 0 || /\.pdf/.test(arr[i - 1].url) || !/\.pdf/.test(c.url))).toBe(true);
   });
 });
 

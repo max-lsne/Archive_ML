@@ -52,7 +52,8 @@ export class FetchError extends Error {
 
 export function normalizeUrl(input: string): URL {
   let s = input.trim();
-  if (/^[a-z][a-z0-9+.-]*:/i.test(s) && !/^https?:/i.test(s)) {
+  // A leading "scheme:" (but not "host:port") that isn't http(s) is rejected outright.
+  if (/^[a-z][a-z0-9+.-]*:(?!\d)/i.test(s) && !/^https?:/i.test(s)) {
     throw new FetchError("Only http(s) links are supported.");
   }
   if (!/^https?:\/\//i.test(s)) s = "https://" + s;
@@ -68,7 +69,7 @@ export function normalizeUrl(input: string): URL {
   return url;
 }
 
-function isPrivateAddress(ip: string): boolean {
+export function isPrivateAddress(ip: string): boolean {
   if (net.isIPv4(ip)) {
     const [a, b] = ip.split(".").map(Number);
     return (
@@ -82,22 +83,42 @@ function isPrivateAddress(ip: string): boolean {
     );
   }
   const v6 = ip.toLowerCase();
-  return v6 === "::1" || v6 === "::" || v6.startsWith("fc") || v6.startsWith("fd") || v6.startsWith("fe80") || v6.startsWith("::ffff:");
+  // IPv4-mapped IPv6 (::ffff:a.b.c.d or ::ffff:7f00:1): judge the embedded IPv4.
+  const mapped = v6.match(/^(?:0*:)*ffff:(.+)$/);
+  if (mapped) {
+    const tail = mapped[1];
+    if (net.isIPv4(tail)) return isPrivateAddress(tail);
+    const hex = tail.split(":");
+    if (hex.length === 2 && hex.every((h) => /^[0-9a-f]{1,4}$/.test(h))) {
+      const n = (parseInt(hex[0], 16) << 16) | parseInt(hex[1], 16);
+      return isPrivateAddress(`${(n >>> 24) & 255}.${(n >>> 16) & 255}.${(n >>> 8) & 255}.${n & 255}`);
+    }
+    return true;
+  }
+  return v6 === "::1" || v6 === "::" || v6.startsWith("fc") || v6.startsWith("fd") || v6.startsWith("fe80");
+}
+
+/**
+ * Pure part of the SSRF check: is this hostname a literal address (IPv4, or a
+ * bracketed/unbracketed IPv6) in a private range, or an obviously local name?
+ * Returns `true` for private, `false` for public literals, `null` when the
+ * host is a DNS name that still needs resolving.
+ */
+export function hostIsPrivateLiteral(hostname: string): boolean | null {
+  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) return true;
+  if (net.isIP(host)) return isPrivateAddress(host);
+  return null;
 }
 
 /** Basic SSRF hygiene: refuse to fetch loopback/private hosts (unless explicitly allowed for local testing). */
 async function assertPublicHost(url: URL): Promise<void> {
   if (config.allowPrivateUrls) return;
-  const host = url.hostname;
-  if (host === "localhost" || host.endsWith(".local") || host.endsWith(".internal")) {
-    throw new FetchError("Links to local or private hosts are not allowed.");
-  }
-  if (net.isIP(host)) {
-    if (isPrivateAddress(host)) throw new FetchError("Links to private network addresses are not allowed.");
-    return;
-  }
+  const literal = hostIsPrivateLiteral(url.hostname);
+  if (literal === true) throw new FetchError("Links to local or private network addresses are not allowed.");
+  if (literal === false) return;
   try {
-    const addrs = await dns.lookup(host, { all: true });
+    const addrs = await dns.lookup(url.hostname, { all: true });
     if (addrs.some((a) => isPrivateAddress(a.address))) {
       throw new FetchError("Links to private network addresses are not allowed.");
     }
@@ -113,44 +134,70 @@ interface Fetched {
   bytes: Buffer;
 }
 
+const MAX_REDIRECTS = 5;
+
+/**
+ * Fetch with manual redirect handling so every hop goes through the
+ * private-host check (a public URL may 30x to an internal address).
+ */
 async function fetchBytes(url: string, maxBytes: number, accept = "*/*"): Promise<Fetched> {
-  await assertPublicHost(new URL(url));
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), config.fetchTimeoutMs);
+  let current = new URL(url);
   try {
-    const res = await fetch(url, {
-      redirect: "follow",
-      signal: ctrl.signal,
-      headers: {
-        "User-Agent": USER_AGENT,
-        Accept: accept,
-        "Accept-Language": "en-US,en;q=0.9",
-      },
-    });
-    if (!res.ok) {
-      throw new FetchError(`The site answered ${res.status} ${res.statusText || ""}`.trim(), res.status);
-    }
-    const len = Number(res.headers.get("content-length") ?? 0);
-    if (len && len > maxBytes) throw new FetchError(`File is too large (${(len / 1e6).toFixed(1)} MB).`);
-    if (!res.body) throw new FetchError("Empty response.");
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    const reader = res.body.getReader();
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > maxBytes) {
-        reader.cancel().catch(() => {});
-        throw new FetchError(`File is too large (over ${(maxBytes / 1e6).toFixed(0)} MB).`);
+    for (let hop = 0; ; hop++) {
+      await assertPublicHost(current);
+      const res = await fetch(current, {
+        redirect: "manual",
+        signal: ctrl.signal,
+        headers: {
+          "User-Agent": USER_AGENT,
+          Accept: accept,
+          "Accept-Language": "en-US,en;q=0.9",
+        },
+      });
+      if (res.status >= 300 && res.status < 400) {
+        const location = res.headers.get("location");
+        await res.body?.cancel().catch(() => {});
+        if (!location) throw new FetchError(`The site answered ${res.status} without a redirect target.`, res.status);
+        if (hop >= MAX_REDIRECTS) throw new FetchError("Too many redirects.");
+        let next: URL;
+        try {
+          next = new URL(location, current);
+        } catch {
+          throw new FetchError("The site redirected to an invalid address.");
+        }
+        if (next.protocol !== "http:" && next.protocol !== "https:") {
+          throw new FetchError("The site redirected to a non-http(s) address.");
+        }
+        current = next;
+        continue;
       }
-      chunks.push(value);
+      if (!res.ok) {
+        throw new FetchError(`The site answered ${res.status} ${res.statusText || ""}`.trim(), res.status);
+      }
+      const len = Number(res.headers.get("content-length") ?? 0);
+      if (len && len > maxBytes) throw new FetchError(`File is too large (${(len / 1e6).toFixed(1)} MB).`);
+      if (!res.body) throw new FetchError("Empty response.");
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      const reader = res.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > maxBytes) {
+          reader.cancel().catch(() => {});
+          throw new FetchError(`File is too large (over ${(maxBytes / 1e6).toFixed(0)} MB).`);
+        }
+        chunks.push(value);
+      }
+      return {
+        finalUrl: current.toString(),
+        contentType: (res.headers.get("content-type") ?? "").toLowerCase(),
+        bytes: Buffer.concat(chunks),
+      };
     }
-    return {
-      finalUrl: res.url || url,
-      contentType: (res.headers.get("content-type") ?? "").toLowerCase(),
-      bytes: Buffer.concat(chunks),
-    };
   } catch (e) {
     if (e instanceof FetchError) throw e;
     const msg = e instanceof Error ? e.message : String(e);
@@ -193,6 +240,19 @@ export function scorePdfCandidate(url: string, anchorText: string): number {
   if (NEGATIVE.test(t)) score -= 4;
   if (NEGATIVE.test(u)) score -= 3;
   return score;
+}
+
+export function looksLikePdfUrl(url: string): boolean {
+  return /\.pdf(\?|#|$)/i.test(url);
+}
+
+/** Real .pdf links first (they are what we can actually use), then by score. */
+export function rankPdfCandidates(candidates: PdfCandidate[]): PdfCandidate[] {
+  return [...candidates].sort((a, b) => {
+    const pa = looksLikePdfUrl(a.url) ? 1 : 0;
+    const pb = looksLikePdfUrl(b.url) ? 1 : 0;
+    return pb - pa || b.score - a.score;
+  });
 }
 
 export interface ParsedPage {
@@ -252,7 +312,7 @@ export function parseHtml(html: string, baseUrl: string): ParsedPage {
     const url = abs(m[1]);
     if (url && !candidates.has(url)) addCandidate(url, "");
   }
-  const pdfCandidates = [...candidates.values()].filter((c) => /\.pdf(\?|#|$)/i.test(c.url) || c.score >= 5).sort((a, b) => b.score - a.score);
+  const pdfCandidates = rankPdfCandidates([...candidates.values()].filter((c) => /\.pdf(\?|#|$)/i.test(c.url) || c.score >= 5));
 
   // Product images (skip icons/logos/sprites)
   const imgs: string[] = [];
@@ -361,13 +421,24 @@ export async function gatherDocumentation(
     imageUrl = page.ogImage;
     sources.push({ kind: "html", url: main.finalUrl, title: page.title || main.finalUrl, size: page.text.length });
 
-    // Download the most promising manuals (at most two, distinct hosts allowed).
-    const picks = page.pdfCandidates.filter((c) => c.score > 0).slice(0, 2);
-    if (page.pdfCandidates.length && !picks.length) picks.push(page.pdfCandidates[0]);
-    for (const [i, cand] of picks.entries()) {
-      onProgress(`Downloading manual ${i + 1}/${picks.length}: ${fileNameFromUrl(cand.url)}`);
-      try {
-        const f = await fetchBytes(cand.url, config.maxPdfBytes, "application/pdf,*/*");
+    // Download the most promising manuals: try up to 4 candidates concurrently,
+    // keep the first 2 (in rank order) that really are PDFs.
+    const MAX_ATTEMPTS = 4;
+    const MAX_PDFS = 2;
+    const ranked = page.pdfCandidates.filter((c) => c.score > 0 || looksLikePdfUrl(c.url));
+    const attempts = (ranked.length ? ranked : page.pdfCandidates).slice(0, MAX_ATTEMPTS);
+    if (attempts.length) {
+      onProgress(`Downloading ${attempts.length === 1 ? "the manual" : "manuals"}: ${attempts.map((c) => fileNameFromUrl(c.url)).join(", ")}`);
+      const results = await Promise.allSettled(attempts.map((cand) => fetchBytes(cand.url, config.maxPdfBytes, "application/pdf,*/*")));
+      for (const [i, result] of results.entries()) {
+        if (pdfs.length >= MAX_PDFS) break;
+        const cand = attempts[i];
+        if (result.status === "rejected") {
+          const e: unknown = result.reason;
+          warnings.push(`Could not download ${fileNameFromUrl(cand.url)}: ${e instanceof Error ? e.message : String(e)}`);
+          continue;
+        }
+        const f = result.value;
         if (!isPdf(f.contentType, f.bytes, f.finalUrl)) {
           warnings.push(`${fileNameFromUrl(cand.url)} was not a PDF.`);
           continue;
@@ -375,20 +446,17 @@ export async function gatherDocumentation(
         const pdf = await loadPdf(f.finalUrl, f.bytes, cand.text || fileNameFromUrl(f.finalUrl), warnings);
         pdfs.push(pdf);
         sources.push({ kind: "pdf", url: f.finalUrl, title: pdf.title, size: pdf.bytes.length, pages: pdf.pages });
-      } catch (e) {
-        warnings.push(`Could not download ${fileNameFromUrl(cand.url)}: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
 
     // A few product photos help Claude understand the finished object.
-    const imgUrls = [page.ogImage, ...page.imageCandidates].filter((u): u is string => Boolean(u));
-    const seen = new Set<string>();
-    for (const u of imgUrls) {
-      if (images.length >= 3) break;
-      if (seen.has(u)) continue;
-      seen.add(u);
-      const img = await fetchImage(u);
-      if (img) images.push(img);
+    const imgUrls = [...new Set([page.ogImage, ...page.imageCandidates].filter((u): u is string => Boolean(u)))].slice(0, 5);
+    if (imgUrls.length) {
+      const settled = await Promise.allSettled(imgUrls.map((u) => fetchImage(u)));
+      for (const r of settled) {
+        if (images.length >= 3) break;
+        if (r.status === "fulfilled" && r.value) images.push(r.value);
+      }
     }
     if (!imageUrl && images[0]) imageUrl = images[0].url;
   } else {

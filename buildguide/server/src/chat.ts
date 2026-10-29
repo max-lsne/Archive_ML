@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { CAMERA_HINTS, describeHardware, type AssemblyPlan } from "../../shared/plan.js";
+import { CAMERA_HINTS, describeHardware, instancesByComponent, type AssemblyPlan } from "../../shared/plan.js";
 import type { ChatEvent, ChatMessage, UiAction } from "../../shared/project.js";
 import { config } from "./config.js";
 import { log } from "./logger.js";
@@ -91,10 +91,7 @@ function executeUiTool(
       const p = HighlightParts.safeParse(input);
       if (!p.success) return { ok: false, result: "Invalid input: expected { instanceIds: string[] }" };
       const known = new Set(plan.instances.map((i) => i.id));
-      const byComponent = new Map<string, string[]>();
-      for (const inst of plan.instances) {
-        byComponent.set(inst.componentId, [...(byComponent.get(inst.componentId) ?? []), inst.id]);
-      }
+      const byComponent = instancesByComponent(plan);
       // Be forgiving: a component id expands to all of its instances.
       const ids = new Set<string>();
       const unknown: string[] = [];
@@ -161,11 +158,20 @@ export async function runClaudeChat(ctx: ChatContext, emit: Emit): Promise<void>
   let fullText = "";
   let usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
   let jsonRetries = 0;
+  const MAX_ITERATIONS = 6;
+  let pendingToolUses = false;
 
-  for (let iteration = 0; iteration < 6; iteration++) {
+  const emitText = (text: string) => {
+    fullText += text;
+    emit({ type: "text", text });
+  };
+
+  for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
+    let turnText = "";
+    pendingToolUses = false;
     const stream = anthropic.beta.messages.stream({
       model: config.model,
-      max_tokens: 4000,
+      max_tokens: 8000,
       output_config: { effort: config.chatEffort },
       betas: ["server-side-fallback-2026-07-01"],
       fallbacks: "default",
@@ -175,8 +181,8 @@ export async function runClaudeChat(ctx: ChatContext, emit: Emit): Promise<void>
       messages,
     });
     stream.on("text", (delta) => {
-      fullText += delta;
-      emit({ type: "text", text: delta });
+      turnText += delta;
+      emitText(delta);
     });
 
     let message: Anthropic.Beta.BetaMessage;
@@ -184,7 +190,8 @@ export async function runClaudeChat(ctx: ChatContext, emit: Emit): Promise<void>
       message = await stream.finalMessage();
       jsonRetries = 0;
     } catch (err) {
-      if (err instanceof Anthropic.APIError || jsonRetries++ >= 2) throw err;
+      // Re-issuing after text already reached the client would stream the answer twice.
+      if (err instanceof Anthropic.APIError || turnText.length > 0 || jsonRetries++ >= 2) throw err;
       log.warn("chat: tool input was not parseable JSON, re-issuing the turn");
       continue;
     }
@@ -197,21 +204,21 @@ export async function runClaudeChat(ctx: ChatContext, emit: Emit): Promise<void>
     };
 
     if (message.stop_reason === "refusal") {
-      if (!fullText) {
-        const t = "I can't help with that one. Ask me anything about assembling this product.";
-        fullText = t;
-        emit({ type: "text", text: t });
-      }
+      if (!fullText) emitText("I can't help with that one. Ask me anything about assembling this product.");
       break;
     }
     if (message.stop_reason === "pause_turn") {
       messages.push({ role: "assistant", content: message.content });
       continue;
     }
-    // A tool input cut off at max_tokens can still parse; never run it.
-    if (message.stop_reason === "max_tokens") break;
+    // A tool input cut off at max_tokens can still parse; never run it, and say so.
+    if (message.stop_reason === "max_tokens") {
+      emitText(`${fullText ? "\n\n" : ""}[The answer was cut short. Ask again more specifically.]`);
+      break;
+    }
     const toolUses = message.content.filter((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === "tool_use");
     if (message.stop_reason !== "tool_use" || toolUses.length === 0) break;
+    pendingToolUses = true;
 
     messages.push({ role: "assistant", content: message.content });
     const results: Anthropic.Beta.BetaToolResultBlockParam[] = toolUses.map((tu) => {
@@ -219,6 +226,14 @@ export async function runClaudeChat(ctx: ChatContext, emit: Emit): Promise<void>
       return { type: "tool_result", tool_use_id: tu.id, content: result, is_error: !ok };
     });
     messages.push({ role: "user", content: results });
+    pendingToolUses = false;
+    if (iteration === MAX_ITERATIONS - 1) {
+      // Tools ran but the model never got to answer: don't end in silence.
+      emitText(`${fullText ? "\n\n" : ""}[I stopped after too many view actions. Ask again and I'll keep it shorter.]`);
+    }
+  }
+  if (pendingToolUses) {
+    emitText(`${fullText ? "\n\n" : ""}[I stopped before finishing. Ask again and I'll keep it shorter.]`);
   }
 
   emit({
@@ -269,8 +284,7 @@ export async function runMockChat(ctx: ChatContext, emit: Emit): Promise<void> {
   }
 
   // Part lookup by name or label
-  const byComponent = new Map<string, string[]>();
-  for (const inst of plan.instances) byComponent.set(inst.componentId, [...(byComponent.get(inst.componentId) ?? []), inst.id]);
+  const byComponent = instancesByComponent(plan);
   const comp = plan.components.find(
     (c) => q.includes(c.name.toLowerCase()) || (c.label && new RegExp(`\\b(part\\s+)?${escapeRe(c.label.toLowerCase())}\\b`).test(q)),
   );

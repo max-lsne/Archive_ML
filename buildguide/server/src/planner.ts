@@ -41,8 +41,17 @@ export class ClaudePlanner implements Planner {
     const sentAsDocument: boolean[] = [];
     const pdfSummaries: Parameters<typeof plannerUserText>[0]["pdfSummaries"] = [];
 
+    // Base64 inflates payloads by 4/3 and the API caps a request at 32 MB, so
+    // attach documents/images only while the encoded total stays within budget.
+    const base64Size = (bytes: number) => Math.ceil(bytes / 3) * 4;
+    let payload = 0;
     for (const pdf of gathered.pdfs) {
-      const attach = pdf.bytes.length <= config.maxPdfBytes && (pdf.pages === 0 || pdf.pages <= config.maxPdfPages);
+      const encoded = base64Size(pdf.bytes.length);
+      const attach =
+        pdf.bytes.length <= config.maxAttachPdfBytes &&
+        payload + encoded <= config.maxRequestBytes &&
+        (pdf.pages === 0 || pdf.pages <= config.maxPdfPages);
+      if (attach) payload += encoded;
       sentAsDocument.push(attach);
       if (attach) {
         content.push({
@@ -61,6 +70,9 @@ export class ClaudePlanner implements Planner {
       });
     }
     for (const img of gathered.images) {
+      const encoded = base64Size(img.bytes.length);
+      if (payload + encoded > config.maxRequestBytes) continue;
+      payload += encoded;
       content.push({
         type: "image",
         source: { type: "base64", media_type: img.mediaType, data: img.bytes.toString("base64") },

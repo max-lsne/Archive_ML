@@ -97,7 +97,7 @@ await shot("07-tent");
 if (LINK) {
   console.log(`7. Pipeline with ${LINK}`);
   await page.goto(BASE, { waitUntil: "networkidle" });
-  await page.fill("input[type=url]", LINK);
+  await page.fill("input[inputmode=url]", LINK);
   await page.click("text=Build my guide");
   await page.waitForSelector(".progress-card", { timeout: 15000 });
   await shot("08-progress");
