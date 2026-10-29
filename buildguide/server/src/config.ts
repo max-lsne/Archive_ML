@@ -73,10 +73,26 @@ export const config = {
   maxAttachPdfBytes: 20 * 1024 * 1024,
   /** Budget for all base64 document/image payload in one request (API limit is 32 MB total). */
   maxRequestBytes: 28 * 1024 * 1024,
-  maxPdfPages: 150,
+  /**
+   * Longest PDF handed to Claude as a document. The API accepts up to 600 pages
+   * on 1M-context models (the default claude-opus-5-5) but only 100 on 200K-context
+   * models, so lower this (BUILDGUIDE_MAX_PDF_PAGES) when BUILDGUIDE_MODEL is a 200K model.
+   */
+  maxPdfPages: parsePositiveInt(process.env.BUILDGUIDE_MAX_PDF_PAGES, 150, "BUILDGUIDE_MAX_PDF_PAGES"),
   maxPageTextChars: 40_000,
   maxPdfTextChars: 60_000,
+  /** Idle timeout for a fetch: abort when no bytes arrive for this long. */
   fetchTimeoutMs: 25_000,
+  /** Hard cap on one fetch (all redirects plus the body), however steady the trickle. */
+  fetchMaxTotalMs: 4 * 60_000,
 };
+
+function parsePositiveInt(v: string | undefined, fallback: number, name: string): number {
+  if (v === undefined || v === "") return fallback;
+  const n = Number(v);
+  if (Number.isInteger(n) && n > 0) return n;
+  console.warn(`[config] ignoring invalid ${name} "${v}" (expected a positive integer); using ${fallback}`);
+  return fallback;
+}
 
 export type AppConfig = typeof config;

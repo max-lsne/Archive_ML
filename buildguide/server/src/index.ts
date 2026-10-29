@@ -275,8 +275,10 @@ app.post("/api/projects/:id/chat", async (req, res) => {
   res.on("close", () => abort.abort());
   const ctx: ChatContext = { plan: p.plan, history, stepIndex, signal: abort.signal };
   const useClaude = config.hasCredentials && !config.mock && !p.demo;
-  if (useClaude && config.chatIncludesManual) ctx.manual = await cachedManual(p);
   try {
+    // Inside the try: the headers are already flushed, so a failure here must
+    // still produce an error event and end the stream.
+    if (useClaude && config.chatIncludesManual) ctx.manual = await cachedManual(p);
     if (useClaude) await runClaudeChat(ctx, (ev) => sse.data(ev));
     else await runMockChat(ctx, (ev) => sse.data(ev));
   } catch (err) {

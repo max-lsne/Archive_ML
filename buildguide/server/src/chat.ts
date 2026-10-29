@@ -202,6 +202,8 @@ export async function runClaudeChat(ctx: ChatContext, emit: Emit): Promise<void>
       { signal },
     );
     stream.on("text", (delta) => {
+      // Text from a new model turn (after tool calls) must not run into the previous sentence.
+      if (turnText === "" && fullText && !/\s$/.test(fullText)) emitText("\n\n");
       turnText += delta;
       emitText(delta);
     });
@@ -401,8 +403,10 @@ export async function runMockChat(ctx: ChatContext, emit: Emit): Promise<void> {
 
 /**
  * Which component is a (lower-cased) question about? Component names win,
- * longest match first; labels match on their own only when they are longer
- * than one character, otherwise only as "part A" so the article "a" never matches.
+ * longest match first. Labels match on their own only when they are longer
+ * than one character and not purely numeric; single letters ("A") and numbers
+ * ("12") match only as "part A" / "part 12", so the article "a" and step or
+ * quantity numbers never hijack a question.
  */
 export function findComponentInQuestion(plan: AssemblyPlan, q: string): Component | undefined {
   const byName = plan.components
@@ -412,7 +416,8 @@ export function findComponentInQuestion(plan: AssemblyPlan, q: string): Componen
   return plan.components.find((c) => {
     const label = c.label.trim().toLowerCase();
     if (!label) return false;
-    const re = label.length === 1 ? new RegExp(`\\bpart\\s+${escapeRe(label)}\\b`) : new RegExp(`\\b(?:part\\s+)?${escapeRe(label)}\\b`);
+    const needsPartPrefix = label.length === 1 || /^\d+$/.test(label);
+    const re = needsPartPrefix ? new RegExp(`\\bpart\\s+${escapeRe(label)}\\b`) : new RegExp(`\\b(?:part\\s+)?${escapeRe(label)}\\b`);
     return re.test(q);
   });
 }

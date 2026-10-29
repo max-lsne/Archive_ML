@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hostIsPrivateLiteral, isPrivateAddress, normalizeUrl, parseHtml, rankPdfCandidates, scorePdfCandidate } from "../server/src/fetcher";
+import { hostIsPrivateLiteral, isPdf, isPrivateAddress, normalizeUrl, parseHtml, rankPdfCandidates, scorePdfCandidate } from "../server/src/fetcher";
 import { parseLooseJson } from "../server/src/planner";
 
 describe("parseHtml", () => {
@@ -127,7 +127,43 @@ describe("rankPdfCandidates", () => {
   });
 });
 
+describe("parseHtml escaped JSON URLs", () => {
+  it("finds PDF links serialised with \\u002F escapes", () => {
+    const html = `<html><body><script>window.__data = {"manual":"https:\\u002F\\u002Fcdn.example.com\\u002Fdocs\\u002Fmanual.pdf"}</script></body></html>`;
+    const page = parseHtml(html, "https://shop.example.com/p/desk");
+    expect(page.pdfCandidates.map((c) => c.url)).toContain("https://cdn.example.com/docs/manual.pdf");
+  });
+  it("finds PDF links serialised with \\/ escapes (lower-case u002f too)", () => {
+    const html = `<script>{"a":"https:\\/\\/cdn.example.com\\/a.pdf","b":"https:\\u002f\\u002fcdn.example.com\\u002fb.pdf"}</script>`;
+    const urls = parseHtml(html, "https://shop.example.com/").pdfCandidates.map((c) => c.url);
+    expect(urls).toContain("https://cdn.example.com/a.pdf");
+    expect(urls).toContain("https://cdn.example.com/b.pdf");
+  });
+});
+
+describe("isPdf", () => {
+  const pdf = Buffer.from("%PDF-1.4\n%junk");
+  const json = Buffer.from('{"error":"denied"}');
+  it("accepts the magic bytes whatever the content type", () => {
+    expect(isPdf("application/octet-stream", pdf)).toBe(true);
+    expect(isPdf("", pdf)).toBe(true);
+  });
+  it("accepts an explicit application/pdf content type (loadPdf then validates)", () => {
+    expect(isPdf("application/pdf; charset=binary", json)).toBe(true);
+  });
+  it("rejects non-PDF bodies even at a .pdf URL", () => {
+    expect(isPdf("application/json", json)).toBe(false);
+    expect(isPdf("application/octet-stream", Buffer.from("<html>denied</html>"))).toBe(false);
+    expect(isPdf("text/html", Buffer.from("<html>"))).toBe(false);
+  });
+});
+
 describe("parseLooseJson", () => {
+  it("reports malformed output with a friendly error", () => {
+    expect(() => parseLooseJson('{"a":1} {"b":2}')).toThrow("Claude's answer was not valid JSON.");
+    expect(() => parseLooseJson('{"a":[1,2')).toThrow("Claude's answer was not valid JSON.");
+    expect(() => parseLooseJson("no json here")).toThrow("Claude's answer was not valid JSON.");
+  });
   it("strips fences and trailing prose", () => {
     expect(parseLooseJson('```json\n{"a":1}\n```')).toEqual({ a: 1 });
     expect(parseLooseJson('Here you go: {"a":[1,2]} hope that helps')).toEqual({ a: [1, 2] });

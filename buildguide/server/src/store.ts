@@ -20,8 +20,10 @@ export function registerPipeline(id: string, controller: AbortController): void 
   pipelines.set(id, controller);
 }
 
+/** Called from the pipeline's finally: no more writes can follow, so its tombstone can go too. */
 export function unregisterPipeline(id: string): void {
   pipelines.delete(id);
+  tombstones.delete(id);
 }
 
 function projectDir(id: string): string {
@@ -120,11 +122,13 @@ export async function deleteProject(id: string): Promise<boolean> {
   if (!isValidId(id)) return false;
   const current = projects.get(id) ?? (await readProjectFile(id));
   const existed = Boolean(current);
-  tombstones.add(id);
+  // A tombstone only matters while a pipeline may still write; it is removed when
+  // that pipeline unregisters. Deleting unknown ids must not grow the set.
+  const pipeline = pipelines.get(id);
+  if (pipeline) tombstones.add(id);
   projects.delete(id);
   // Stop a pipeline that is still fetching or waiting on Claude: no point paying for a discarded plan.
-  pipelines.get(id)?.abort();
-  pipelines.delete(id);
+  pipeline?.abort();
   // Let open /events streams finish instead of pinging a deleted project forever.
   if (current) {
     emitter.emit(`project:${id}`, { ...current, status: "error", error: "Project deleted", progress: "Deleted", plan: undefined } satisfies Project);

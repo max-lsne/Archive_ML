@@ -45,11 +45,33 @@ describe("findComponentInQuestion", () => {
     expect(findComponentInQuestion(plan, "which way does the adjustable shelf go")?.id).toBe("adjustable_shelf");
     expect(findComponentInQuestion(plan, "where is the fixed middle shelf")?.id).toBe("fixed_shelf");
   });
-  it("matches multi-character labels on their own", () => {
-    expect(findComponentInQuestion(plan, "what is 100383")?.id).toBe("cam_lock");
+  it("matches alphanumeric labels on their own, numeric ones only as 'part N'", () => {
+    const alnum = normalizePlan({
+      components: [{ id: "bracket", label: "AB12", name: "Bracket", shape: "box", size: [4, 2, 1] }],
+      instances: [{ id: "bracket_1", componentId: "bracket" }],
+      steps: [{ title: "Fit", instruction: "Fit the bracket to the panel.", addInstances: ["bracket_1"] }],
+    });
+    expect(findComponentInQuestion(alnum, "what is ab12")?.id).toBe("bracket");
+    expect(findComponentInQuestion(plan, "what is 100383")).toBeUndefined();
+    expect(findComponentInQuestion(plan, "what is part 100383")?.id).toBe("cam_lock");
   });
   it("returns undefined when nothing matches", () => {
     expect(findComponentInQuestion(plan, "how long will it take")).toBeUndefined();
+  });
+  it("matches purely numeric labels only as 'part N'", () => {
+    const numeric = normalizePlan({
+      components: [
+        { id: "bolt", label: "12", name: "Bolt", shape: "cylinder", size: [1, 4, 1], isHardware: true },
+        { id: "leg", label: "100383", name: "Leg", shape: "box", size: [4, 40, 4] },
+      ],
+      instances: [{ id: "leg_1", componentId: "leg" }],
+      steps: [{ title: "Attach the leg", instruction: "Attach the leg with the bolt.", addInstances: ["leg_1"], durationMinutes: 5 }],
+    });
+    expect(findComponentInQuestion(numeric, "how long does step 12 take")).toBeUndefined();
+    expect(findComponentInQuestion(numeric, "i need 12 of these")).toBeUndefined();
+    expect(findComponentInQuestion(numeric, "where does part 12 go")?.id).toBe("bolt");
+    expect(findComponentInQuestion(numeric, "what is part 100383")?.id).toBe("leg");
+    expect(routeMockQuestion(numeric, "how long does step 12 take?")).toEqual({ kind: "duration" });
   });
 });
 

@@ -203,12 +203,28 @@ export class FetchCancelled extends FetchError {
 async function fetchBytes(url: string, maxBytes: number, accept = "*/*", signal?: AbortSignal): Promise<Fetched> {
   if (signal?.aborted) throw new FetchCancelled();
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), config.fetchTimeoutMs);
-  // The per-request timeout and the caller's cancellation both abort the fetch.
+  // Idle timeout (reset on every redirect hop and every received chunk) so a large
+  // manual on a slow link is not cut off, plus a hard overall cap as a safety net.
+  let timedOut: "idle" | "total" | null = null;
+  let idleTimer: NodeJS.Timeout | undefined;
+  const resetIdle = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      timedOut = "idle";
+      ctrl.abort();
+    }, config.fetchTimeoutMs);
+  };
+  const totalTimer = setTimeout(() => {
+    timedOut = "total";
+    ctrl.abort();
+  }, config.fetchMaxTotalMs);
+  resetIdle();
+  // The timeouts and the caller's cancellation all abort the fetch.
   const combined = signal ? AbortSignal.any([ctrl.signal, signal]) : ctrl.signal;
   let current = new URL(url);
   try {
     for (let hop = 0; ; hop++) {
+      resetIdle();
       await assertPublicHost(current);
       const res = await undiciFetch(current, {
         dispatcher: getDispatcher(),
@@ -249,6 +265,7 @@ async function fetchBytes(url: string, maxBytes: number, accept = "*/*", signal?
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
+        resetIdle();
         total += value.byteLength;
         if (total > maxBytes) {
           reader.cancel().catch(() => {});
@@ -266,21 +283,35 @@ async function fetchBytes(url: string, maxBytes: number, accept = "*/*", signal?
     if (e instanceof FetchError) throw e;
     if (signal?.aborted) throw new FetchCancelled();
     const msg = e instanceof Error ? e.message : String(e);
-    if (/abort/i.test(msg)) throw new FetchError("Timed out fetching the link.");
+    if (timedOut === "total") {
+      throw new FetchError(`Gave up fetching the link after ${Math.round(config.fetchMaxTotalMs / 60_000)} minutes.`);
+    }
+    if (timedOut === "idle" || /abort/i.test(msg)) {
+      throw new FetchError(`Timed out fetching the link (no data for ${Math.round(config.fetchTimeoutMs / 1000)} s).`);
+    }
     // undici wraps network errors in a bare "fetch failed"; surface the real cause.
     const cause = (e as { cause?: { code?: string; message?: string } }).cause;
     if (cause?.code === "EPRIVATEADDR") throw new FetchError("Links to private network addresses are not allowed.");
     const detail = cause?.code || cause?.message;
     throw new FetchError(`Could not fetch the link (${detail ? `${msg}: ${detail}` : msg}).${detail === "ENOTFOUND" ? " Check the address and your network/proxy settings." : ""}`);
   } finally {
-    clearTimeout(timer);
+    clearTimeout(idleTimer);
+    clearTimeout(totalTimer);
   }
 }
 
-function isPdf(contentType: string, bytes: Buffer, url: string): boolean {
-  if (contentType.includes("application/pdf")) return true;
-  if (bytes.subarray(0, 5).toString("latin1") === "%PDF-") return true;
-  return looksLikePdfUrl(url) && !contentType.includes("text/html");
+export function hasPdfMagic(bytes: Uint8Array): boolean {
+  return Buffer.from(bytes.subarray(0, 5)).toString("latin1") === "%PDF-";
+}
+
+/**
+ * Is this body a PDF? The magic bytes settle it; otherwise only an explicit
+ * application/pdf content type counts (loadPdf then insists the text layer is
+ * readable). A JSON or octet-stream error page at a .pdf URL is not a manual.
+ */
+export function isPdf(contentType: string, bytes: Uint8Array): boolean {
+  if (hasPdfMagic(bytes)) return true;
+  return contentType.split(";")[0].trim() === "application/pdf";
 }
 
 // ---------------------------------------------------------------------------
@@ -370,14 +401,16 @@ export function parseHtml(html: string, baseUrl: string): ParsedPage {
     if (!url) return;
     if (looksLikePdfUrl(url) || POSITIVE.test(text)) addCandidate(url, text);
   });
-  // ... and from anywhere in the raw markup (embedded JSON, data attributes)
-  const rawRe = /https?:\\?\/\\?\/[^\s"'<>)]+?\.pdf(?:\?[^\s"'<>)]*)?/gi;
-  for (const m of html.matchAll(rawRe)) {
-    const url = abs(m[0].replace(/\\\//g, "/").replace(/\\u002f/gi, "/"));
+  // ... and from anywhere in the raw markup (embedded JSON, data attributes).
+  // JSON serialisers escape slashes as \/ or \u002F, so undo that first.
+  const unescaped = html.replace(/\\\//g, "/").replace(/\\u002f/gi, "/");
+  const rawRe = /https?:\/\/[^\s"'<>)\\]+?\.pdf(?:\?[^\s"'<>)\\]*)?/gi;
+  for (const m of unescaped.matchAll(rawRe)) {
+    const url = abs(m[0]);
     if (url && !candidates.has(url)) addCandidate(url, "");
   }
-  const relRe = /["'](\/[^\s"'<>]+?\.pdf(?:\?[^\s"'<>]*)?)["']/gi;
-  for (const m of html.matchAll(relRe)) {
+  const relRe = /["'](\/[^\s"'<>\\]+?\.pdf(?:\?[^\s"'<>\\]*)?)["']/gi;
+  for (const m of unescaped.matchAll(relRe)) {
     const url = abs(m[1]);
     if (url && !candidates.has(url)) addCandidate(url, "");
   }
@@ -418,6 +451,9 @@ async function loadPdf(url: string, bytes: Buffer, title: string, warnings: stri
     pages = result.totalPages;
     text = (result.text || "").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
   } catch (e) {
+    // Claimed to be a PDF by content type but neither looks nor parses like one:
+    // an error page in disguise. Skip it rather than hand garbage to Claude.
+    if (!hasPdfMagic(bytes)) throw new FetchError(`${title} was not a readable PDF.`);
     warnings.push(`Could not read text from ${title}: ${e instanceof Error ? e.message : String(e)}`);
   }
   if (text.length > config.maxPdfTextChars) text = text.slice(0, config.maxPdfTextChars) + "\n…[truncated]";
@@ -477,7 +513,7 @@ export async function gatherDocumentation(
   let pageText = "";
   let imageUrl: string | undefined;
 
-  if (isPdf(main.contentType, main.bytes, main.finalUrl)) {
+  if (isPdf(main.contentType, main.bytes)) {
     onProgress("Reading the manual PDF…");
     const pdf = await loadPdf(main.finalUrl, main.bytes, fileNameFromUrl(main.finalUrl), warnings);
     pdfs.push(pdf);
@@ -503,7 +539,7 @@ export async function gatherDocumentation(
       onProgress(`Downloading manual ${pdfs.length + 1}/${Math.min(MAX_PDFS, attempts.length)}: ${fileNameFromUrl(cand.url)}${i > pdfs.length ? ` (candidate ${i + 1})` : ""}`);
       try {
         const f = await fetchBytes(cand.url, config.maxPdfBytes, "application/pdf,*/*", signal);
-        if (!isPdf(f.contentType, f.bytes, f.finalUrl)) {
+        if (!isPdf(f.contentType, f.bytes)) {
           warnings.push(`${fileNameFromUrl(cand.url)} was not a PDF.`);
           continue;
         }

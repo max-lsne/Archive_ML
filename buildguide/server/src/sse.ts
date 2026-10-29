@@ -17,10 +17,6 @@ export class SseWriter {
     });
   }
 
-  get isClosed(): boolean {
-    return this.closed;
-  }
-
   send(event: string, data: unknown): void {
     if (this.closed) return;
     this.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);

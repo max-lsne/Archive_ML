@@ -62,7 +62,9 @@ export class ClaudePlanner implements Planner {
       const attach =
         pdf.bytes.length <= config.maxAttachPdfBytes &&
         payload + encoded <= config.maxRequestBytes &&
-        (pdf.pages === 0 || pdf.pages <= config.maxPdfPages);
+        // pages === 0 means the text layer could not be read: fall back to text only.
+        pdf.pages > 0 &&
+        pdf.pages <= config.maxPdfPages;
       if (attach) payload += encoded;
       sentAsDocument.push(attach);
       if (attach) {
@@ -159,6 +161,12 @@ export class ClaudePlanner implements Planner {
     if (message.stop_reason === "max_tokens") {
       throw new Error("The plan was too long to finish. Try a product with a shorter manual, or split it in two.");
     }
+    if (message.stop_reason === "model_context_window_exceeded") {
+      throw new Error("The documentation is too large for the model's context window. Try a direct link to a shorter manual.");
+    }
+    if (message.stop_reason && message.stop_reason !== "end_turn") {
+      throw new Error(`Claude stopped early (${message.stop_reason}). Please try again.`);
+    }
 
     const text = message.content
       .filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === "text")
@@ -190,7 +198,13 @@ export function parseLooseJson(text: string): unknown {
   } catch {
     const start = trimmed.indexOf("{");
     const end = trimmed.lastIndexOf("}");
-    if (start >= 0 && end > start) return JSON.parse(trimmed.slice(start, end + 1));
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(trimmed.slice(start, end + 1));
+      } catch {
+        /* fall through to the friendly error */
+      }
+    }
     throw new Error("Claude's answer was not valid JSON.");
   }
 }
