@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
 import type { AssemblyPlan } from "../../../shared/plan";
-import { instanceStepIndex } from "../../../shared/plan";
+import { componentMap, instanceStepIndex } from "../../../shared/plan";
 import { PartMesh, type PartState } from "./PartMesh";
 import { tightBounds } from "./geometry";
 
@@ -23,7 +23,7 @@ interface Props {
  * (ghosted or hidden).
  */
 export function Assembly({ plan, stepIndex, highlighted, hovered, exploded, ghostFuture, showLabels, onHover, onClick }: Props) {
-  const components = useMemo(() => new Map(plan.components.map((c) => [c.id, c])), [plan]);
+  const components = useMemo(() => componentMap(plan), [plan]);
   const stepOf = useMemo(() => instanceStepIndex(plan), [plan]);
   const bounds = useMemo(() => {
     const full = plan.instances

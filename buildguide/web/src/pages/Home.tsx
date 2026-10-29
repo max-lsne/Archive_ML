@@ -78,7 +78,7 @@ export function Home({ config, onOpen }: Props) {
           </p>
           <form className="url-form" onSubmit={submit}>
             <div className="row-input">
-              <input className="input" type="url" placeholder="https://www.ikea.com/…/billy-bookcase… or a direct link to the instructions PDF" value={url} onChange={(e) => setUrl(e.target.value)} disabled={busy} required aria-label="Product or manual link" />
+              <input className="input" type="text" inputMode="url" autoComplete="off" spellCheck={false} placeholder="https://www.ikea.com/…/billy-bookcase… or a direct link to the instructions PDF" value={url} onChange={(e) => setUrl(e.target.value)} disabled={busy} required aria-label="Product or manual link" />
               <button className="btn primary" type="submit" disabled={busy || !url.trim()}>
                 {busy ? <span className="spinner" /> : "Build my guide"}
               </button>

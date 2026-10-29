@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { AssemblyPlan, CameraHint } from "../../shared/plan";
+import { instancesByComponent, type AssemblyPlan, type CameraHint } from "../../shared/plan";
 import type { ChatMessage, Project, UiAction } from "../../shared/project";
 import { api } from "./api";
 
@@ -149,7 +149,7 @@ export const useStore = create<State>((set, get) => ({
   highlightComponent: (componentId) => {
     const { plan, highlighted } = get();
     if (!plan) return;
-    const ids = plan.instances.filter((i) => i.componentId === componentId).map((i) => i.id);
+    const ids = instancesByComponent(plan).get(componentId) ?? [];
     const already = ids.length > 0 && ids.every((id) => highlighted.includes(id));
     set({ highlighted: already ? [] : ids, selected: already ? null : ids[0] ?? null });
   },

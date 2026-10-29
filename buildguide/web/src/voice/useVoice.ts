@@ -1,9 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { describeHardware } from "../../../shared/plan";
+import { componentMap, describeHardware } from "../../../shared/plan";
 import { parseVoiceCommand, type VoiceCommand } from "../../../shared/voice";
 import { useStore } from "../store";
 import { Recognizer, sttSupported } from "./stt";
 import { speak, stopSpeaking, ttsSupported } from "./tts";
+
+/** Recognizer errors after which listening cannot recover on its own. */
+const FATAL_STT_ERRORS: Record<string, string> = {
+  "not-allowed": "Microphone access was blocked.",
+  "service-not-allowed": "Speech recognition is not allowed in this browser.",
+  "audio-capture": "No microphone was found.",
+  network: "Speech recognition needs a network connection.",
+  "language-not-supported": "Speech recognition does not support this language.",
+};
+
+const RESTART_BASE_MS = 400;
+const RESTART_MAX_MS = 8000;
 
 /**
  * Wires speech synthesis and recognition to the store:
@@ -25,7 +37,24 @@ export function useVoice() {
   const speakingRef = useRef(false);
   const handsFreeRef = useRef(false);
   const restartTimer = useRef<number | null>(null);
+  /** Consecutive recognizer ends without a result; drives the restart backoff. */
+  const idleEnds = useRef(0);
   const supported = useMemo(() => ({ tts: ttsSupported(), stt: sttSupported() }), []);
+
+  // Latest settings and callbacks, readable from long-lived closures (timers, recognizer callbacks).
+  const voiceRef = useRef(voice);
+  voiceRef.current = voice;
+  const startListeningRef = useRef<() => void>(() => {});
+  const dispatchRef = useRef<(cmd: VoiceCommand) => void>(() => {});
+
+  const scheduleListen = useCallback((delay: number) => {
+    if (restartTimer.current) window.clearTimeout(restartTimer.current);
+    restartTimer.current = window.setTimeout(() => {
+      restartTimer.current = null;
+      if (!handsFreeRef.current || speakingRef.current) return;
+      startListeningRef.current();
+    }, delay);
+  }, []);
 
   const say = useCallback(
     (text: string) => {
@@ -35,8 +64,8 @@ export function useVoice() {
       speakingRef.current = true;
       setVoiceStatus("speaking");
       speak(text, {
-        rate: voice.rate,
-        voiceURI: voice.voiceURI,
+        rate: voiceRef.current.rate,
+        voiceURI: voiceRef.current.voiceURI,
         onEnd: () => {
           speakingRef.current = false;
           setVoiceStatus(handsFreeRef.current ? "listening" : "idle");
@@ -44,8 +73,7 @@ export function useVoice() {
         },
       });
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [voice.rate, voice.voiceURI, supported.tts],
+    [supported.tts, recognizer, scheduleListen, setVoiceStatus],
   );
 
   const stop = useCallback(() => {
@@ -53,8 +81,7 @@ export function useVoice() {
     speakingRef.current = false;
     setVoiceStatus(handsFreeRef.current ? "listening" : "idle");
     if (handsFreeRef.current) scheduleListen(100);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [scheduleListen, setVoiceStatus]);
 
   const speakCurrentStep = useCallback(() => {
     const s = useStore.getState();
@@ -71,7 +98,7 @@ export function useVoice() {
       firstNonce.current = false;
       return; // don't talk the moment the page opens
     }
-    if (voice.speakSteps) speakCurrentStep();
+    if (voiceRef.current.speakSteps) speakCurrentStep();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [speakNonce]);
 
@@ -115,10 +142,11 @@ export function useVoice() {
         case "parts": {
           const step = p.steps[s.stepIndex];
           const hw = describeHardware(p, step);
+          const components = componentMap(p);
           const added = step.addInstances
             .map((id) => {
               const inst = p.instances.find((i) => i.id === id);
-              const comp = inst && p.components.find((c) => c.id === inst.componentId);
+              const comp = inst && components.get(inst.componentId);
               return comp ? `${comp.name}${comp.label ? ` ${comp.label}` : ""}` : "";
             })
             .filter((v, i, arr) => v && arr.indexOf(v) === i);
@@ -146,55 +174,59 @@ export function useVoice() {
     },
     [say, stop],
   );
+  dispatchRef.current = dispatch;
 
   // ---- hands-free listening -------------------------------------------------
-  const scheduleListen = useCallback((delay: number) => {
-    if (restartTimer.current) window.clearTimeout(restartTimer.current);
-    restartTimer.current = window.setTimeout(() => {
-      restartTimer.current = null;
-      if (!handsFreeRef.current || speakingRef.current) return;
-      startListening();
-    }, delay);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   const startListening = useCallback(() => {
     if (!supported.stt || !handsFreeRef.current || speakingRef.current) return;
+    let gotResult = false;
+    let fatal = false;
     const ok = recognizer.start({
       continuous: true,
       onResult: (text, isFinal) => {
+        gotResult = true;
+        idleEnds.current = 0;
         setLastHeard(text);
-        if (isFinal) {
-          const cmd = parseVoiceCommand(text);
-          dispatch(cmd);
-        }
+        if (isFinal) dispatchRef.current(parseVoiceCommand(text));
       },
       onEnd: () => {
-        if (handsFreeRef.current && !speakingRef.current) scheduleListen(400);
+        if (fatal || !handsFreeRef.current || speakingRef.current) return;
+        // Back off when the recognizer keeps ending without hearing anything,
+        // so a flaky service doesn't turn into a tight restart loop.
+        idleEnds.current = gotResult ? 0 : idleEnds.current + 1;
+        const delay = Math.min(RESTART_MAX_MS, RESTART_BASE_MS * 2 ** Math.max(0, idleEnds.current - 1));
+        scheduleListen(delay);
       },
       onError: (err) => {
-        if (err === "not-allowed" || err === "service-not-allowed") {
+        const message = FATAL_STT_ERRORS[err];
+        if (message) {
+          fatal = true;
+          if (restartTimer.current) window.clearTimeout(restartTimer.current);
           useStore.getState().setVoice({ handsFree: false });
-          setLastHeard("Microphone access was blocked.");
+          setLastHeard(message);
+          setVoiceStatus("idle");
         }
       },
     });
     setVoiceStatus(ok ? "listening" : "idle");
-  }, [recognizer, supported.stt, dispatch, scheduleListen, setLastHeard, setVoiceStatus]);
+  }, [recognizer, supported.stt, scheduleListen, setLastHeard, setVoiceStatus]);
+  startListeningRef.current = startListening;
 
   useEffect(() => {
     handsFreeRef.current = voice.handsFree;
     if (voice.handsFree) {
+      idleEnds.current = 0;
       setLastHeard("");
-      startListening();
+      startListeningRef.current();
     } else {
+      if (restartTimer.current) window.clearTimeout(restartTimer.current);
       recognizer.stop();
       if (!speakingRef.current) setVoiceStatus("idle");
     }
     return () => {
       if (restartTimer.current) window.clearTimeout(restartTimer.current);
     };
-  }, [voice.handsFree, startListening, recognizer, setVoiceStatus, setLastHeard]);
+  }, [voice.handsFree, recognizer, setVoiceStatus, setLastHeard]);
 
   useEffect(() => () => {
     recognizer.stop();
@@ -206,6 +238,7 @@ export function useVoice() {
     return new Promise((resolve) => {
       if (!supported.stt) return resolve("");
       const wasHandsFree = handsFreeRef.current;
+      if (restartTimer.current) window.clearTimeout(restartTimer.current);
       recognizer.stop();
       stopSpeaking();
       let finalText = "";
@@ -223,7 +256,11 @@ export function useVoice() {
           if (wasHandsFree) scheduleListen(300);
           resolve(finalText || interim);
         },
-        onError: () => resolve(finalText || interim),
+        onError: (err) => {
+          const message = FATAL_STT_ERRORS[err];
+          if (message) setLastHeard(message);
+          resolve(finalText || interim);
+        },
       });
       if (!ok) resolve("");
     });

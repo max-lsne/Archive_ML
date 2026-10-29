@@ -1,6 +1,7 @@
 import { useStore } from "../store";
 import { api } from "../api";
 import { minutes } from "../lib/format";
+import { componentMap, instancesByComponent } from "../../../shared/plan";
 
 interface Props {
   onSpeak: () => void;
@@ -21,13 +22,14 @@ export function StepCard({ onSpeak, onStop, speaking, ttsSupported }: Props) {
   const highlighted = useStore((s) => s.highlighted);
   const step = plan.steps[stepIndex];
   if (!step) return null;
-  const components = new Map(plan.components.map((c) => [c.id, c]));
+  const components = componentMap(plan);
+  const instancesOf = instancesByComponent(plan);
   const pdfIndex = project.sources.findIndex((s) => s.kind === "pdf");
   const isLast = stepIndex === plan.steps.length - 1;
   const done = Boolean(completed[step.id]);
 
   const toggleHw = (componentId: string) => {
-    const ids = plan.instances.filter((i) => i.componentId === componentId).map((i) => i.id);
+    const ids = instancesOf.get(componentId) ?? [];
     const on = ids.length && ids.every((id) => highlighted.includes(id));
     setHighlighted(on ? [] : ids.length ? ids : step.addInstances);
   };

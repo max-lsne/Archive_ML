@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useStore } from "../store";
 import { minutes, bytes, hostOf, cap } from "../lib/format";
 import { api } from "../api";
+import { instancesByComponent } from "../../../shared/plan";
 
 type Tab = "steps" | "parts" | "overview";
 
@@ -53,9 +54,9 @@ function PartsList() {
   const plan = useStore((s) => s.plan)!;
   const highlighted = useStore((s) => s.highlighted);
   const highlightComponent = useStore((s) => s.highlightComponent);
-  const instancesOf = (id: string) => plan.instances.filter((i) => i.componentId === id);
+  const instancesOf = instancesByComponent(plan);
   const isActive = (id: string) => {
-    const ids = instancesOf(id).map((i) => i.id);
+    const ids = instancesOf.get(id) ?? [];
     return ids.length > 0 && ids.every((x) => highlighted.includes(x));
   };
   const structural = plan.components.filter((c) => !c.isHardware);
