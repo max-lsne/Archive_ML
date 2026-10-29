@@ -362,7 +362,14 @@ export function normalizePlan(input: unknown): AssemblyPlan {
         const h = (h0 && typeof h0 === "object" ? h0 : {}) as Record<string, unknown>;
         return { componentId: resolveComponentId(str(h.componentId)), qty: Math.max(1, Math.round(num(h.qty, 1))) };
       })
-      .filter((h): h is { componentId: string; qty: number } => h.componentId !== null);
+      .filter((h): h is { componentId: string; qty: number } => h.componentId !== null)
+      // Merge repeated references to the same component (e.g. given once by id and once by label).
+      .reduce<{ componentId: string; qty: number }[]>((acc, h) => {
+        const prev = acc.find((x) => x.componentId === h.componentId);
+        if (prev) prev.qty += h.qty;
+        else acc.push({ ...h });
+        return acc;
+      }, []);
     steps.push({
       id: i + 1,
       title: str(s.title, `Step ${i + 1}`),
@@ -442,7 +449,11 @@ export function componentMap(plan: AssemblyPlan): Map<string, Component> {
 /** Map component id -> ids of its instances, in plan order. */
 export function instancesByComponent(plan: AssemblyPlan): Map<string, string[]> {
   const m = new Map<string, string[]>();
-  for (const inst of plan.instances) m.set(inst.componentId, [...(m.get(inst.componentId) ?? []), inst.id]);
+  for (const inst of plan.instances) {
+    const list = m.get(inst.componentId);
+    if (list) list.push(inst.id);
+    else m.set(inst.componentId, [inst.id]);
+  }
   return m;
 }
 

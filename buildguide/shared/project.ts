@@ -88,3 +88,21 @@ export function pickManualIndex(sources: SourceDoc[], opts: { attachedOnly?: boo
   for (const s of pool) if ((s.pages ?? 0) > (best.pages ?? 0)) best = s;
   return pdfs.indexOf(best);
 }
+
+export interface PdfAttachLimits {
+  /** Largest raw PDF, in bytes, that may be sent to Claude as a document. */
+  maxAttachPdfBytes: number;
+  /** Largest page count that may be sent as a document. */
+  maxPdfPages: number;
+}
+
+/**
+ * Single source of truth for "may this PDF be handed to Claude as a document":
+ * used by the planner when building the analysis request and by the chat route
+ * when attaching the manual, so both sides always agree.
+ */
+export function canAttachPdf(bytes: number, pages: number | undefined, limits: PdfAttachLimits): boolean {
+  if (bytes <= 0 || bytes > limits.maxAttachPdfBytes) return false;
+  if (pages === undefined || pages <= 0) return false;
+  return pages <= limits.maxPdfPages;
+}

@@ -69,10 +69,8 @@ describe("normalizePlan", () => {
       instances: [{ id: "s1", componentId: "A" }],
       steps: [{ title: "s", addInstances: ["s1"], hardware: [{ componentId: "100383", qty: 4 }, { componentId: "Cam lock", qty: 2 }, { componentId: "nope", qty: 1 }] }],
     });
-    expect(plan.steps[0].hardware).toEqual([
-      { componentId: "cam_lock", qty: 4 },
-      { componentId: "cam_lock", qty: 2 },
-    ]);
+    // Both references resolve to the same component and are merged.
+    expect(plan.steps[0].hardware).toEqual([{ componentId: "cam_lock", qty: 6 }]);
     expect(plan.instances[0].componentId).toBe("side_panel");
   });
 

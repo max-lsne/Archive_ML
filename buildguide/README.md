@@ -55,6 +55,7 @@ All optional, see `.env.example`:
 | `BUILDGUIDE_CHAT_MANUAL` | `1` | Attach the manual PDF to chat (prompt-cached) |
 | `BUILDGUIDE_DATA_DIR` | `./data` | Where plans and downloaded manuals are stored |
 | `PORT` | `8787` | Server port |
+| `HOST` | `127.0.0.1` | Bind address. Set `0.0.0.0` to expose the server on your network |
 | `MOCK_CLAUDE` | – | `1` = canned plans, no API calls |
 | `BUILDGUIDE_ALLOW_PRIVATE_URLS` | – | `1` = allow localhost/private links (testing only) |
 
@@ -81,7 +82,7 @@ API: `POST /api/projects {url, notes}` → `{id}`; `GET /api/projects/:id/events
 
 ```bash
 npm run typecheck
-npm test                                   # 35 unit tests
+npm test                                   # unit tests (schema, normaliser, voice, fetcher, chat routing)
 npm run build && MOCK_CLAUDE=1 npm start   # then, in another terminal:
 npm run smoke                              # needs playwright (npm i -D playwright && npx playwright install chromium)
 ```
@@ -94,5 +95,7 @@ The smoke test opens both samples, steps through them, explodes the model, highl
 
 - Browser support for voice: speech synthesis works in all major browsers; speech **recognition** (hands-free mode and the mic button) needs Chrome, Edge or Safari.
 - Some retailers block automated access. If a product page fails, paste a direct link to the instructions PDF.
+- The server listens on localhost only by default; its API has no authentication, so only expose it (`HOST=0.0.0.0`) on networks you trust.
+- Behind an HTTP(S) proxy the proxy performs name resolution, so the fetcher's private-network guard can only check literal addresses and local hostnames; rely on the proxy's own policy for internal hosts.
 - Plans are AI-generated from the documentation you provide; dimensions are approximate and the manufacturer's safety instructions always take precedence.
 - A full plan is typically 20–80 KB of JSON; generation for a long manual can take a few minutes. Progress streams to the UI.
