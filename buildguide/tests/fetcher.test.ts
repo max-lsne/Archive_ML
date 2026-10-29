@@ -229,3 +229,18 @@ describe("sniffImage", () => {
     expect(sniffImage(Buffer.from([0xff, 0xd8, 0xff]))).toBeNull();
   });
 });
+
+describe("isPrivateAddress extra ranges", () => {
+  it("covers NAT64, 6to4 and reserved IPv4 blocks", () => {
+    expect(isPrivateAddress("64:ff9b::7f00:1")).toBe(true);
+    expect(isPrivateAddress("64:ff9b::169.254.169.254")).toBe(true);
+    expect(isPrivateAddress("64:ff9b::808:808")).toBe(false);
+    expect(isPrivateAddress("2002:7f00:1::")).toBe(true);
+    expect(isPrivateAddress("2002:5db8:d822::")).toBe(false);
+    expect(isPrivateAddress("192.0.0.5")).toBe(true);
+    expect(isPrivateAddress("198.19.1.1")).toBe(true);
+    expect(isPrivateAddress("224.0.0.1")).toBe(true);
+    expect(isPrivateAddress("255.255.255.255")).toBe(true);
+    expect(isPrivateAddress("93.184.216.34")).toBe(false);
+  });
+});

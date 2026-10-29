@@ -413,14 +413,14 @@ export async function runMockChat(ctx: ChatContext, emit: Emit): Promise<void> {
  */
 export function findComponentInQuestion(plan: AssemblyPlan, q: string): Component | undefined {
   const byName = plan.components
-    .filter((c) => c.name.trim() && new RegExp(`\\b${escapeRe(c.name.toLowerCase())}s?\\b`).test(q))
+    .filter((c) => c.name.trim() && new RegExp(`(?<![\\w])${escapeRe(c.name.toLowerCase())}s?(?![\\w])`).test(q))
     .sort((a, b) => b.name.length - a.name.length);
   if (byName.length) return byName[0];
   return plan.components.find((c) => {
     const label = c.label.trim().toLowerCase();
     if (!label) return false;
     const needsPartPrefix = label.length === 1 || /^\d+$/.test(label);
-    const re = needsPartPrefix ? new RegExp(`\\bpart\\s+${escapeRe(label)}\\b`) : new RegExp(`\\b(?:part\\s+)?${escapeRe(label)}\\b`);
+    const re = needsPartPrefix ? new RegExp(`(?<![\\w])part\\s+${escapeRe(label)}(?![\\w])`) : new RegExp(`(?<![\\w])(?:part\\s+)?${escapeRe(label)}(?![\\w])`);
     return re.test(q);
   });
 }

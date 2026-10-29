@@ -1,4 +1,4 @@
-import { Suspense, useCallback, useMemo, useRef } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef } from "react";
 import { Canvas } from "@react-three/fiber";
 import { ContactShadows, Grid, OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
@@ -6,7 +6,7 @@ import { componentMap, type CameraHint, type Component } from "../../../shared/p
 import { useStore } from "../store";
 import { Assembly } from "./Assembly";
 import { CameraRig } from "./CameraRig";
-import { tightBounds } from "./geometry";
+import { disposeGeometryCache, tightBounds } from "./geometry";
 
 const VIEWS: { id: CameraHint; label: string }[] = [
   { id: "iso", label: "Iso" },
@@ -46,6 +46,8 @@ export function Viewer3D() {
     [setSelected, setHighlighted],
   );
 
+  // Geometries are shared through a module cache; drop them when the plan goes away.
+  useEffect(() => () => disposeGeometryCache(), [plan]);
   const components = useMemo(() => (plan ? componentMap(plan) : new Map<string, Component>()), [plan]);
   const bounds = useMemo(() => {
     if (!plan) return new THREE.Box3(new THREE.Vector3(-50, 0, -50), new THREE.Vector3(50, 100, 50));

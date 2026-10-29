@@ -3,6 +3,12 @@ import type { Component, Shape } from "../../../shared/plan";
 
 const cache = new Map<string, THREE.BufferGeometry>();
 
+/** Dispose every cached geometry; call when the plan changes so GPU memory does not grow across projects. */
+export function disposeGeometryCache(): void {
+  for (const g of cache.values()) g.dispose();
+  cache.clear();
+}
+
 /**
  * Build (and memoise) a geometry for a component. Every geometry is centred on
  * its bounding box so that instance.position can be used directly.

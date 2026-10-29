@@ -70,16 +70,18 @@ export type ChatEvent =
   | { type: "done"; text: string; usage?: Partial<Usage> }
   | { type: "error"; message: string };
 
-/**
- * Index, among the PDF sources, of the document most likely to be the assembly
- * manual: prefer PDFs that were handed to Claude, then the one with most pages.
- * Returns -1 when the project has no PDF. Used by both the chat route and the
- * step card so the assistant and the "Manual p.N" links agree.
- */
 /** PDF sources in order; the index in this list matches the stored manual-N.pdf file. */
 export function pdfSources(sources: SourceDoc[]): SourceDoc[] {
   return sources.filter((s) => s.kind === "pdf");
 }
+
+/**
+ * Index, among the PDF sources, of the document most likely to be the assembly
+ * manual: prefer PDFs that were handed to Claude, then the one with most pages.
+ * Returns -1 when the project has no PDF (or, with attachedOnly, none was
+ * attached). Used by both the chat route and the step card so the assistant
+ * and the "Manual p.N" links agree.
+ */
 
 export function pickManualIndex(sources: SourceDoc[], opts: { attachedOnly?: boolean } = {}): number {
   const pdfs = pdfSources(sources);

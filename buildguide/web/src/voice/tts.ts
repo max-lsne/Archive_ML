@@ -86,6 +86,7 @@ export function speak(text: string, opts: SpeakOptions = {}): () => void {
   const voices = getVoices();
   const voice = (opts.voiceURI && voices.find((v) => v.voiceURI === opts.voiceURI)) || pickDefaultVoice(voices);
   let remaining = parts.length;
+  let started = false;
   let finished = false;
   const done = () => {
     retained = [];
@@ -106,6 +107,9 @@ export function speak(text: string, opts: SpeakOptions = {}): () => void {
     }
     u.rate = Math.min(2, Math.max(0.5, opts.rate ?? 1));
     u.pitch = 1;
+    u.onstart = () => {
+      started = true;
+    };
     u.onend = finish;
     u.onerror = finish;
     retained.push(u);
@@ -119,7 +123,9 @@ export function speak(text: string, opts: SpeakOptions = {}): () => void {
       clearInterval(nudge);
       return;
     }
-    if (!synth.speaking && !synth.pending) {
+    // Only once playback has begun: before the first onstart a quiet synth just
+    // means the voice is still loading, not that speech is over.
+    if (started && !synth.speaking && !synth.pending) {
       clearInterval(nudge);
       done();
       return;

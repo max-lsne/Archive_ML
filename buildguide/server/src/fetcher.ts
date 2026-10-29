@@ -84,10 +84,16 @@ export function isPrivateAddress(ip: string): boolean {
       (a === 169 && b === 254) ||
       (a === 172 && b >= 16 && b <= 31) ||
       (a === 192 && b === 168) ||
-      (a === 100 && b >= 64 && b <= 127)
+      (a === 192 && b === 0) || // 192.0.0.0/24 IETF protocol assignments
+      (a === 198 && (b === 18 || b === 19)) || // 198.18.0.0/15 benchmarking
+      (a === 100 && b >= 64 && b <= 127) ||
+      a >= 224 // multicast and reserved, incl. 255.255.255.255
     );
   }
   const v6 = ip.toLowerCase();
+  // NAT64 (64:ff9b::/96) and 6to4 (2002::/16) embed an IPv4 address: judge that.
+  const embedded = embeddedIPv4(v6);
+  if (embedded) return isPrivateAddress(embedded);
   // IPv4-mapped IPv6 (::ffff:a.b.c.d or ::ffff:7f00:1): judge the embedded IPv4.
   const mapped = v6.match(/^(?:0*:)*ffff:(.+)$/);
   if (mapped) {
@@ -104,6 +110,35 @@ export function isPrivateAddress(ip: string): boolean {
   return v6 === "::1" || v6 === "::" || v6.startsWith("fc") || v6.startsWith("fd") || /^fe[89ab]/.test(v6);
 }
 
+/** IPv4 address embedded in a NAT64 (64:ff9b::a.b.c.d / ::hhhh:hhhh) or 6to4 (2002:hhhh:hhhh::) address, if any. */
+function embeddedIPv4(v6: string): string | null {
+  const hextets = expandIPv6(v6);
+  if (!hextets) return null;
+  const toV4 = (hi: number, lo: number) => `${hi >>> 8}.${hi & 255}.${lo >>> 8}.${lo & 255}`;
+  if (hextets[0] === 0x64 && hextets[1] === 0xff9b && hextets.slice(2, 6).every((h) => h === 0)) return toV4(hextets[6], hextets[7]);
+  if (hextets[0] === 0x2002) return toV4(hextets[1], hextets[2]);
+  return null;
+}
+
+/** Expand an IPv6 literal (with optional trailing dotted IPv4) into eight hextets. */
+function expandIPv6(v6: string): number[] | null {
+  if (!net.isIPv6(v6)) return null;
+  let s = v6;
+  const v4 = s.match(/(\d+\.\d+\.\d+\.\d+)$/);
+  if (v4) {
+    const [a, b, c, d] = v4[1].split(".").map(Number);
+    s = s.slice(0, -v4[1].length) + ((a << 8) | b).toString(16) + ":" + ((c << 8) | d).toString(16);
+  }
+  const parts = s.split("::");
+  const head = parts[0] ? parts[0].split(":") : [];
+  const tail = parts.length > 1 && parts[1] ? parts[1].split(":") : [];
+  const missing = 8 - head.length - tail.length;
+  if (missing < 0 || (parts.length === 1 && missing !== 0)) return null;
+  const all = [...head, ...Array(parts.length > 1 ? missing : 0).fill("0"), ...tail];
+  if (all.length !== 8) return null;
+  return all.map((h) => parseInt(h || "0", 16));
+}
+
 /**
  * Pure part of the SSRF check: is this hostname a literal address (IPv4, or a
  * bracketed/unbracketed IPv6) in a private range, or an obviously local name?
@@ -117,7 +152,6 @@ export function hostIsPrivateLiteral(hostname: string): boolean | null {
   return null;
 }
 
-/** Basic SSRF hygiene: refuse to fetch loopback/private hosts (unless explicitly allowed for local testing). */
 /**
  * Synchronous half of the SSRF check (literal IPs and local names); used by the
  * create-project route for an early 400 and by assertPublicHost on every hop.
@@ -130,6 +164,7 @@ export function assertPublicHostLiteral(url: URL): boolean {
   return literal === false;
 }
 
+/** Basic SSRF hygiene: refuse to fetch loopback/private hosts (unless explicitly allowed for local testing). */
 async function assertPublicHost(url: URL): Promise<void> {
   if (assertPublicHostLiteral(url)) return;
   try {
@@ -150,6 +185,8 @@ interface Fetched {
 }
 
 const MAX_REDIRECTS = 5;
+/** Web pages are parsed synchronously; a few MB is more than any product page needs. */
+const HTML_MAX_BYTES = 4 * 1024 * 1024;
 
 /**
  * DNS resolution that refuses private addresses at connect time. assertPublicHost
@@ -188,10 +225,6 @@ function getDispatcher(): Dispatcher {
   return dispatcher;
 }
 
-/**
- * Fetch with manual redirect handling so every hop goes through the
- * private-host check (a public URL may 30x to an internal address).
- */
 /** Raised when the caller's signal (project deleted) cancels a fetch. */
 export class FetchCancelled extends FetchError {
   constructor() {
@@ -203,8 +236,14 @@ export class FetchCancelled extends FetchError {
 interface FetchOptions {
   /** Reject web pages before reading the body and non-PDF bodies after the first chunk. */
   expectPdf?: boolean;
+  /** Lower size cap applied once the response is known to be HTML (parsed synchronously). */
+  htmlMaxBytes?: number;
 }
 
+/**
+ * Fetch with manual redirect handling so every hop goes through the
+ * private-host check (a public URL may 30x to an internal address).
+ */
 async function fetchBytes(url: string, maxBytes: number, accept = "*/*", signal?: AbortSignal, opts: FetchOptions = {}): Promise<Fetched> {
   if (signal?.aborted) throw new FetchCancelled();
   const ctrl = new AbortController();
@@ -268,6 +307,7 @@ async function fetchBytes(url: string, maxBytes: number, accept = "*/*", signal?
         await res.body?.cancel().catch(() => {});
         throw new FetchError("The link was a web page, not a PDF.");
       }
+      if (opts.htmlMaxBytes && (mime === "text/html" || mime === "application/xhtml+xml")) maxBytes = Math.min(maxBytes, opts.htmlMaxBytes);
       const len = Number(res.headers.get("content-length") ?? 0);
       if (len && len > maxBytes) throw new FetchError(`File is too large (${(len / 1e6).toFixed(1)} MB).`);
       if (!res.body) throw new FetchError("Empty response.");
@@ -645,7 +685,7 @@ export async function gatherDocumentation(
   const images: ImageDoc[] = [];
 
   onProgress(`Fetching ${url.hostname}…`);
-  const main = await fetchBytes(url.toString(), config.maxPdfBytes + 2 * 1024 * 1024, "text/html,application/pdf,*/*", signal);
+  const main = await fetchBytes(url.toString(), config.maxPdfBytes + 2 * 1024 * 1024, "text/html,application/pdf,*/*", signal, { htmlMaxBytes: HTML_MAX_BYTES });
 
   let pageTitle = "";
   let pageDescription = "";
@@ -703,8 +743,14 @@ export async function gatherDocumentation(
     }
     if (!imageUrl && images[0]) imageUrl = images[0].url;
   } else {
-    // Plain text or unknown: use whatever text we got.
-    pageText = main.bytes.toString("utf8").slice(0, config.maxPageTextChars);
+    // Plain text or unknown. Images and other binaries are not documentation.
+    if (sniffImage(main.bytes)) throw new FetchError("That link is an image, not a manual. Paste the product page or the instructions PDF instead.");
+    const decoded = main.bytes.toString("utf8").slice(0, config.maxPageTextChars);
+    const garbage = (decoded.match(/\uFFFD/g) ?? []).length;
+    if (decoded.length && garbage / decoded.length > 0.02) {
+      throw new FetchError("The link returned binary content rather than a page or a PDF.");
+    }
+    pageText = decoded;
     sources.push({ kind: "text", url: main.finalUrl, title: fileNameFromUrl(main.finalUrl), size: pageText.length });
   }
 

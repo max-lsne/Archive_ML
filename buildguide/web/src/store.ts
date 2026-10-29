@@ -212,9 +212,9 @@ export const useStore = create<State>((set, get) => ({
     const projectId = project.id;
     /** False once another project was loaded or this request was superseded. */
     const current = () => activeChat === controller && !controller.signal.aborted && get().project?.id === projectId;
-    const patch = (p: Partial<ChatEntry>) => {
+    const patch = (p: Partial<ChatEntry> | ((m: ChatEntry) => Partial<ChatEntry>)) => {
       if (!current()) return;
-      set((s) => ({ chat: s.chat.map((m) => (m.id === reply.id ? { ...m, ...p } : m)) }));
+      set((s) => ({ chat: s.chat.map((m) => (m.id === reply.id ? { ...m, ...(typeof p === "function" ? p(m) : p) } : m)) }));
     };
     // Set once the stream delivered a terminal event; a stream that ends without
     // one (server killed, proxy cut the response) must not leave an empty bubble.
@@ -223,10 +223,10 @@ export const useStore = create<State>((set, get) => ({
       await api.chat(project.id, history, get().stepIndex, (ev) => {
         if (!current()) return;
         if (ev.type === "text") {
-          set((s) => ({ chat: s.chat.map((m) => (m.id === reply.id ? { ...m, content: m.content + ev.text } : m)) }));
+          patch((m) => ({ content: m.content + ev.text }));
         } else if (ev.type === "action") {
           get().applyAction(ev.action);
-          set((s) => ({ chat: s.chat.map((m) => (m.id === reply.id ? { ...m, actions: [...(m.actions ?? []), ev.action] } : m)) }));
+          patch((m) => ({ actions: [...(m.actions ?? []), ev.action] }));
         } else if (ev.type === "done") {
           const entry = get().chat.find((m) => m.id === reply.id);
           const text = ev.text || entry?.content || "";

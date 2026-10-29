@@ -240,11 +240,10 @@ async function cachedManual(p: Project): Promise<{ title: string; data: string }
   if (idx < 0) return undefined;
   const source = pdfSources(p.sources)[idx];
   if (!source) return undefined;
-  // The planner's attach predicate, shared so chat and plan agree on the manual.
-  const limits = { maxAttachPdfBytes: config.maxAttachPdfBytes, maxPdfPages: config.maxPdfPages };
-  if (!canAttachPdf(source.size || 1, source.pages, limits)) return undefined;
+  // The planner already applied canAttachPdf when it set sentAsDocument; re-check
+  // against the real file size in case the limits changed since.
   const bytes = await readManual(p.id, idx);
-  if (!bytes || !canAttachPdf(bytes.length, source.pages, limits)) return undefined;
+  if (!bytes || !canAttachPdf(bytes.length, source.pages, { maxAttachPdfBytes: config.maxAttachPdfBytes, maxPdfPages: config.maxPdfPages })) return undefined;
   const entry = { title: source.title, data: bytes.toString("base64"), bytes: bytes.length };
   manualCache.set(p.id, entry);
   while (manualCache.size > MANUAL_CACHE_MAX) {

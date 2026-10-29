@@ -121,9 +121,11 @@ export function useVoice() {
     const last = chat[chat.length - 1];
     if (!last || last.role !== "assistant" || last.streaming || last.error) return;
     if (spokenReplies.current.has(last.id)) return;
+    // Record the decision either way so enabling the setting later never reads
+    // an old, already-displayed reply aloud.
+    spokenReplies.current.add(last.id);
     if (!voice.speakReplies) return;
     if (!(last.spoken || handsFreeRef.current)) return;
-    spokenReplies.current.add(last.id);
     if (last.content.trim()) say(last.content);
   }, [chat, voice.speakReplies, say]);
 
