@@ -7,11 +7,21 @@ import type { Project, ProjectSummary } from "../../shared/project.js";
 const projects = new Map<string, Project>();
 /** Ids deleted while a pipeline may still be running; writes for them are dropped. */
 const tombstones = new Set<string>();
+/** Abort controllers of pipelines still running, so a delete can stop their network and model calls. */
+const pipelines = new Map<string, AbortController>();
 const emitter = new EventEmitter();
 emitter.setMaxListeners(200);
 
 export function isDeleted(id: string): boolean {
   return tombstones.has(id);
+}
+
+export function registerPipeline(id: string, controller: AbortController): void {
+  pipelines.set(id, controller);
+}
+
+export function unregisterPipeline(id: string): void {
+  pipelines.delete(id);
 }
 
 function projectDir(id: string): string {
@@ -112,6 +122,9 @@ export async function deleteProject(id: string): Promise<boolean> {
   const existed = Boolean(current);
   tombstones.add(id);
   projects.delete(id);
+  // Stop a pipeline that is still fetching or waiting on Claude: no point paying for a discarded plan.
+  pipelines.get(id)?.abort();
+  pipelines.delete(id);
   // Let open /events streams finish instead of pinging a deleted project forever.
   if (current) {
     emitter.emit(`project:${id}`, { ...current, status: "error", error: "Project deleted", progress: "Deleted", plan: undefined } satisfies Project);
@@ -134,7 +147,14 @@ export async function saveManual(id: string, index: number, bytes: Buffer): Prom
   if (tombstones.has(id)) return undefined;
   await fs.mkdir(projectDir(id), { recursive: true });
   const file = path.join(projectDir(id), `manual-${index}.pdf`);
-  await fs.writeFile(file, bytes);
+  const tmp = `${file}.tmp`;
+  await fs.writeFile(tmp, bytes);
+  if (tombstones.has(id)) {
+    // Deleted while we were writing: mirror saveProject and leave no orphan behind.
+    await fs.rm(projectDir(id), { recursive: true, force: true }).catch(() => {});
+    return undefined;
+  }
+  await fs.rename(tmp, file);
   return file;
 }
 

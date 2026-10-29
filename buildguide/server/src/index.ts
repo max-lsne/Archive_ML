@@ -13,13 +13,15 @@ import {
   listProjects,
   onProjectChange,
   readManual,
+  registerPipeline,
   saveManual,
   saveProject,
   summarize,
   touchProject,
+  unregisterPipeline,
 } from "./store.js";
-import { FetchError, gatherDocumentation, hostIsPrivateLiteral, normalizeUrl } from "./fetcher.js";
-import { createPlanner } from "./planner.js";
+import { FetchCancelled, FetchError, gatherDocumentation, hostIsPrivateLiteral, normalizeUrl } from "./fetcher.js";
+import { PlanCancelled, createPlanner } from "./planner.js";
 import { runClaudeChat, runMockChat, type ChatContext } from "./chat.js";
 import { SAMPLE_PLANS, findSample } from "../../shared/samples/index.js";
 import { normalizePlan } from "../../shared/plan.js";
@@ -122,8 +124,12 @@ class ProjectDeleted extends Error {
 }
 
 async function runPipeline(project: Project): Promise<void> {
+  // Deleting the project aborts this controller, which cancels the fetches and
+  // the Claude request instead of letting them run on for a discarded result.
+  const abort = new AbortController();
+  registerPipeline(project.id, abort);
   const checkAlive = () => {
-    if (isDeleted(project.id)) throw new ProjectDeleted();
+    if (isDeleted(project.id) || abort.signal.aborted) throw new ProjectDeleted();
   };
   const update = async (patch: Partial<Project>, persist = false) => {
     checkAlive();
@@ -133,16 +139,25 @@ async function runPipeline(project: Project): Promise<void> {
   };
   try {
     await update({ status: "fetching", progress: "Fetching the link…" });
-    const gathered = await gatherDocumentation(project.url, (message) => {
-      if (!isDeleted(project.id)) void update({ progress: message });
-    });
+    const gathered = await gatherDocumentation(
+      project.url,
+      (message) => {
+        if (!isDeleted(project.id)) void update({ progress: message });
+      },
+      abort.signal,
+    );
     checkAlive();
     for (const [i, pdf] of gathered.pdfs.entries()) await saveManual(project.id, i, pdf.bytes);
     await update({ sources: gathered.sources, imageUrl: gathered.imageUrl, status: "analyzing", progress: "Analysing the documentation…" }, true);
 
-    const result = await planner.generate(gathered, project.notes, (message, chars) => {
-      if (!isDeleted(project.id)) void update({ progress: message, progressChars: chars });
-    });
+    const result = await planner.generate(
+      gathered,
+      project.notes,
+      (message, chars) => {
+        if (!isDeleted(project.id)) void update({ progress: message, progressChars: chars });
+      },
+      abort.signal,
+    );
     checkAlive();
     for (const [i, sent] of result.sentAsDocument.entries()) {
       const src = project.sources.filter((s) => s.kind === "pdf")[i];
@@ -151,13 +166,15 @@ async function runPipeline(project: Project): Promise<void> {
     await update({ status: "ready", progress: "Ready", plan: result.plan, usage: result.usage, progressChars: undefined }, true);
     log.info(`project ${project.id} ready: ${result.plan.product.name}`);
   } catch (err) {
-    if (err instanceof ProjectDeleted || isDeleted(project.id)) {
+    if (err instanceof ProjectDeleted || err instanceof PlanCancelled || err instanceof FetchCancelled || abort.signal.aborted || isDeleted(project.id)) {
       log.info(`project ${project.id} was deleted while it was being built; stopping.`);
       return;
     }
     const message = err instanceof FetchError ? err.message : err instanceof Error ? err.message : String(err);
     log.error(`project ${project.id} failed:`, message);
     await update({ status: "error", error: message, progress: "Failed" }, true).catch(() => {});
+  } finally {
+    unregisterPipeline(project.id);
   }
 }
 
@@ -220,12 +237,15 @@ async function cachedManual(p: Project): Promise<{ title: string; data: string }
     manualCache.set(p.id, hit);
     return hit;
   }
-  const idx = pickManualIndex(p.sources);
+  // Only a PDF the planner itself attached; never fall back to one it skipped.
+  const idx = pickManualIndex(p.sources, { attachedOnly: true });
   if (idx < 0) return undefined;
   const source = p.sources.filter((s) => s.kind === "pdf")[idx];
+  if (!source) return undefined;
+  // Same attach predicate as the planner: size and page count (when known).
+  if (source.pages && source.pages > config.maxPdfPages) return undefined;
   const bytes = await readManual(p.id, idx);
-  // Same payload rule as the planner: a PDF that doesn't fit the request stays out.
-  if (!source || !bytes || bytes.length > config.maxAttachPdfBytes) return undefined;
+  if (!bytes || bytes.length > config.maxAttachPdfBytes) return undefined;
   const entry = { title: source.title, data: bytes.toString("base64"), bytes: bytes.length };
   manualCache.set(p.id, entry);
   while (manualCache.size > MANUAL_CACHE_MAX) {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findComponentInQuestion, normalizeHistory } from "../server/src/chat";
+import { findComponentInQuestion, normalizeHistory, routeMockQuestion } from "../server/src/chat";
 import { normalizePlan } from "../shared/plan";
 import { SAMPLE_PLANS } from "../shared/samples/index";
 import type { ChatMessage } from "../shared/project";
@@ -50,5 +50,31 @@ describe("findComponentInQuestion", () => {
   });
   it("returns undefined when nothing matches", () => {
     expect(findComponentInQuestion(plan, "how long will it take")).toBeUndefined();
+  });
+});
+
+describe("routeMockQuestion", () => {
+  const plan = normalizePlan(SAMPLE_PLANS.find((s) => s.id === "sample-bookcase")!.plan);
+  it("treats a part name that contains a command word as a part question", () => {
+    const r = routeMockQuestion(plan, "back panel?");
+    expect(r.kind).toBe("component");
+    if (r.kind === "component") expect(r.component.id).toBe("back_panel");
+  });
+  it("does not jump steps for a duration question that mentions a step", () => {
+    expect(routeMockQuestion(plan, "how long does step 3 take?")).toEqual({ kind: "duration" });
+  });
+  it("routes navigation through the shared voice parser", () => {
+    expect(routeMockQuestion(plan, "go to step three")).toEqual({ kind: "command", command: { type: "goto", step: 3 } });
+    expect(routeMockQuestion(plan, "step twelve")).toEqual({ kind: "command", command: { type: "goto", step: 12 } });
+    expect(routeMockQuestion(plan, "next")).toEqual({ kind: "command", command: { type: "next" } });
+    expect(routeMockQuestion(plan, "what parts do I need?")).toEqual({ kind: "command", command: { type: "parts" } });
+  });
+  it("answers part questions before other heuristics", () => {
+    const r = routeMockQuestion(plan, "what tools do I need for the cam lock");
+    expect(r.kind).toBe("component");
+  });
+  it("falls back for unrelated questions", () => {
+    expect(routeMockQuestion(plan, "is it raining")).toEqual({ kind: "fallback" });
+    expect(routeMockQuestion(plan, "how long will it take")).toEqual({ kind: "duration" });
   });
 });

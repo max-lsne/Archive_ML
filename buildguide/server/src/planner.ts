@@ -20,7 +20,16 @@ export interface PlannerProgress {
 }
 
 export interface Planner {
-  generate(gathered: Gathered, notes: string, onProgress: PlannerProgress): Promise<PlanResult>;
+  /** `signal` aborts the model call when the project is deleted mid-flight. */
+  generate(gathered: Gathered, notes: string, onProgress: PlannerProgress, signal?: AbortSignal): Promise<PlanResult>;
+}
+
+/** Thrown when the caller aborted the generation (project deleted). */
+export class PlanCancelled extends Error {
+  constructor() {
+    super("plan generation cancelled");
+    this.name = "PlanCancelled";
+  }
 }
 
 let client: Anthropic | undefined;
@@ -35,9 +44,10 @@ export function getClient(): Anthropic {
 const PLAN_SCHEMA = betaZodOutputFormat(AssemblyPlanSchema).schema;
 
 export class ClaudePlanner implements Planner {
-  async generate(gathered: Gathered, notes: string, onProgress: PlannerProgress): Promise<PlanResult> {
+  async generate(gathered: Gathered, notes: string, onProgress: PlannerProgress, signal?: AbortSignal): Promise<PlanResult> {
     const anthropic = getClient();
     const started = Date.now();
+    if (signal?.aborted) throw new PlanCancelled();
 
     const content: Anthropic.Beta.BetaContentBlockParam[] = [];
     const sentAsDocument: boolean[] = [];
@@ -98,17 +108,21 @@ export class ClaudePlanner implements Planner {
 
     let chars = 0;
     let lastTick = 0;
-    const stream = anthropic.beta.messages.stream({
-      model: config.model,
-      max_tokens: 64000,
-      // Opus 5.5 always thinks; effort is the depth control. Fallbacks re-run a
-      // (rare) safety decline on Anthropic's recommended substitute model.
-      output_config: { effort: config.effort, format: { type: "json_schema", schema: PLAN_SCHEMA } },
-      betas: ["server-side-fallback-2026-07-01"],
-      fallbacks: "default",
-      system: PLANNER_SYSTEM,
-      messages: [{ role: "user", content }],
-    });
+    const stream = anthropic.beta.messages.stream(
+      {
+        model: config.model,
+        max_tokens: 64000,
+        // Opus 5.5 always thinks; effort is the depth control. Fallbacks re-run a
+        // (rare) safety decline on Anthropic's recommended substitute model.
+        output_config: { effort: config.effort, format: { type: "json_schema", schema: PLAN_SCHEMA } },
+        betas: ["server-side-fallback-2026-07-01"],
+        fallbacks: "default",
+        system: PLANNER_SYSTEM,
+        messages: [{ role: "user", content }],
+      },
+      // Deleting the project aborts the request so the tokens are not billed.
+      { signal },
+    );
     stream.on("text", (delta) => {
       chars += delta.length;
       const now = Date.now();
@@ -122,6 +136,7 @@ export class ClaudePlanner implements Planner {
     try {
       message = await stream.finalMessage();
     } catch (err) {
+      if (signal?.aborted || err instanceof Anthropic.APIUserAbortError) throw new PlanCancelled();
       if (err instanceof Anthropic.AuthenticationError) {
         throw new Error("Claude rejected the API key. Check ANTHROPIC_API_KEY.");
       }
@@ -182,16 +197,22 @@ export function parseLooseJson(text: string): unknown {
 
 /** Returns a bundled sample plan after a short delay; lets the whole UI run without an API key. */
 export class MockPlanner implements Planner {
-  async generate(gathered: Gathered, _notes: string, onProgress: PlannerProgress): Promise<PlanResult> {
+  async generate(gathered: Gathered, _notes: string, onProgress: PlannerProgress, signal?: AbortSignal): Promise<PlanResult> {
     const started = Date.now();
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const checkCancelled = () => {
+      if (signal?.aborted) throw new PlanCancelled();
+    };
+    checkCancelled();
     onProgress("(mock) Pretending to study the documentation…", 0);
     await sleep(800);
     const text = JSON.stringify(pickSample(gathered.url + " " + gathered.pageTitle + " " + gathered.pageText.slice(0, 2000)));
     for (let i = 1; i <= 6; i++) {
+      checkCancelled();
       onProgress("(mock) Computing the 3D assembly plan…", Math.round((text.length * i) / 6));
       await sleep(300);
     }
+    checkCancelled();
     const plan = normalizePlan(JSON.parse(text));
     return {
       plan,

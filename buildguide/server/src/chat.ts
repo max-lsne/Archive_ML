@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { CAMERA_HINTS, describeHardware, instancesByComponent, type AssemblyPlan } from "../../shared/plan.js";
 import type { ChatEvent, ChatMessage, UiAction } from "../../shared/project.js";
+import { parseVoiceCommand, type VoiceCommand } from "../../shared/voice.js";
 import { config } from "./config.js";
 import { log } from "./logger.js";
 import { getClient } from "./planner.js";
@@ -263,10 +264,45 @@ export async function runClaudeChat(ctx: ChatContext, emit: Emit): Promise<void>
 // ---------------------------------------------------------------------------
 // Demo assistant: answers from the plan with simple rules when no API key is set.
 
+type Component = AssemblyPlan["components"][number];
+
+/** How the demo assistant decided to handle a message. Pure, so it can be unit-tested. */
+export type MockRoute =
+  | { kind: "command"; command: Exclude<VoiceCommand, { type: "ask" }> }
+  | { kind: "component"; component: Component }
+  | { kind: "tools" }
+  | { kind: "duration" }
+  | { kind: "safety" }
+  | { kind: "step_parts" }
+  | { kind: "explode" }
+  | { kind: "repeat" }
+  | { kind: "fallback" };
+
+/**
+ * One parser for both voice and typed input: navigation and other commands go
+ * through the shared parseVoiceCommand; anything else is a question, and a
+ * question that names a part is about that part before any other heuristic
+ * ("back panel" is a part, not "go back"; "how long does step 3 take" is a
+ * duration question, not a jump).
+ */
+export function routeMockQuestion(plan: AssemblyPlan, text: string): MockRoute {
+  const command = parseVoiceCommand(text);
+  if (command.type !== "ask") return { kind: "command", command };
+  const q = command.text.toLowerCase();
+  const component = findComponentInQuestion(plan, q);
+  if (component) return { kind: "component", component };
+  if (/\btools?\b/.test(q)) return { kind: "tools" };
+  if (/how long|time|minutes|hours/.test(q)) return { kind: "duration" };
+  if (/safety|warning|danger|careful/.test(q)) return { kind: "safety" };
+  if (/(parts|hardware|need|which screws|what do i need)/.test(q)) return { kind: "step_parts" };
+  if (/explode|exploded|spread/.test(q)) return { kind: "explode" };
+  if (/repeat|again|what do i do/.test(q)) return { kind: "repeat" };
+  return { kind: "fallback" };
+}
+
 export async function runMockChat(ctx: ChatContext, emit: Emit): Promise<void> {
   const { plan } = ctx;
   const last = ctx.history[ctx.history.length - 1];
-  const q = (last?.content ?? "").toLowerCase();
   const step = plan.steps[ctx.stepIndex];
   const say = async (text: string) => {
     // Simulate streaming so the UI path is identical to the real assistant.
@@ -278,68 +314,89 @@ export async function runMockChat(ctx: ChatContext, emit: Emit): Promise<void> {
     emit({ type: "done", text });
   };
   const act = (action: UiAction) => emit({ type: "action", action });
-
-  const stepMatch = q.match(/step\s+(\d+)/) || q.match(/(?:go to|show|open)\s+(?:the\s+)?(\d+)/);
-  if (stepMatch) {
-    const n = parseInt(stepMatch[1], 10);
-    if (n >= 1 && n <= plan.steps.length) {
-      act({ name: "go_to_step", input: { step: n } });
-      return say(`Step ${n}: ${plan.steps[n - 1].title}. ${plan.steps[n - 1].voiceScript}`);
-    }
-    return say(`This plan has ${plan.steps.length} steps, so there is no step ${n}.`);
-  }
-  const isShortCommand = q.split(/\s+/).length <= 3;
-  if (isShortCommand && /\b(next|continue|done)\b/.test(q) && step && ctx.stepIndex + 1 < plan.steps.length) {
-    act({ name: "go_to_step", input: { step: ctx.stepIndex + 2 } });
-    const s = plan.steps[ctx.stepIndex + 1];
-    return say(`On to step ${s.id}: ${s.title}. ${s.voiceScript}`);
-  }
-  if (isShortCommand && /\b(back|previous)\b/.test(q) && ctx.stepIndex > 0) {
-    act({ name: "go_to_step", input: { step: ctx.stepIndex } });
-    const s = plan.steps[ctx.stepIndex - 1];
-    return say(`Back to step ${s.id}: ${s.title}. ${s.voiceScript}`);
-  }
-
-  // Part lookup by name or label
-  const byComponent = instancesByComponent(plan);
-  const comp = findComponentInQuestion(plan, q);
-  if (comp && /where|what|which|show|find|look|is|does|go/.test(q)) {
-    const ids = byComponent.get(comp.id) ?? [];
-    const usedIn = plan.steps.filter((s) => s.addInstances.some((id) => ids.includes(id)) || s.hardware.some((h) => h.componentId === comp.id));
-    // Step first: a step change resets highlights on the client, so highlight after it.
-    if (usedIn[0]) act({ name: "go_to_step", input: { step: usedIn[0].id } });
-    if (ids.length) act({ name: "highlight_parts", input: { instanceIds: ids } });
-    act({ name: "set_exploded", input: { enabled: ids.length > 0 && !comp.isHardware } });
+  const goTo = (n: number) => {
+    const target = plan.steps[n - 1];
+    act({ name: "go_to_step", input: { step: n } });
+    return say(`Step ${n}: ${target.title}. ${target.voiceScript}`);
+  };
+  const stepParts = () => {
+    if (!step) return say("Pick a step first and I'll list its parts.");
+    const hw = describeHardware(plan, step);
+    act({ name: "highlight_parts", input: { instanceIds: step.addInstances } });
     return say(
-      `${comp.name}${comp.label ? ` (${comp.label})` : ""}: ${comp.description || "see the highlighted part in the 3D view."} There ${comp.qty === 1 ? "is one" : `are ${comp.qty}`} in the box${usedIn.length ? `, used in step${usedIn.length > 1 ? "s" : ""} ${usedIn.map((s) => s.id).join(", ")}` : ""}. I've highlighted it for you.`,
+      `For step ${step.id} you need ${hw || "no hardware"}${step.tools.length ? `, plus ${step.tools.join(" and ")}` : ""}. Parts added: ${step.addInstances.length ? step.addInstances.map((id) => plan.instances.find((i) => i.id === id)?.label || id).join(", ") : "none"}.`,
     );
-  }
-  if (/\btools?\b/.test(q)) {
+  };
+  const toolsAnswer = () => {
     const req = plan.tools.filter((t) => t.required).map((t) => t.name);
     const opt = plan.tools.filter((t) => !t.required).map((t) => t.name);
     return say(`You need: ${req.join(", ") || "no tools beyond what's in the box"}.${opt.length ? ` Optional: ${opt.join(", ")}.` : ""}`);
+  };
+
+  const route = routeMockQuestion(plan, last?.content ?? "");
+  switch (route.kind) {
+    case "command": {
+      const c = route.command;
+      switch (c.type) {
+        case "next":
+          if (ctx.stepIndex + 1 >= plan.steps.length) return say("That was the last step. Nice work!");
+          return goTo(ctx.stepIndex + 2);
+        case "prev":
+          if (ctx.stepIndex === 0) return say("You're already on the first step.");
+          return goTo(ctx.stepIndex);
+        case "goto":
+          if (c.step < 1 || c.step > plan.steps.length) return say(`This plan has ${plan.steps.length} steps, so there is no step ${c.step}.`);
+          return goTo(c.step);
+        case "first":
+          return goTo(1);
+        case "last":
+          return goTo(plan.steps.length);
+        case "repeat":
+          return say(step ? step.voiceScript : "Pick a step and I'll read it to you.");
+        case "parts":
+          return stepParts();
+        case "tools":
+          return toolsAnswer();
+        case "explode":
+          act({ name: "set_exploded", input: { enabled: c.enabled } });
+          return say(c.enabled ? "Here's the exploded view so you can see how the parts fit together." : "Back to the assembled view.");
+        case "stop":
+          return say("Okay.");
+      }
+      return say("Okay.");
+    }
+    case "component": {
+      const comp = route.component;
+      const ids = instancesByComponent(plan).get(comp.id) ?? [];
+      const usedIn = plan.steps.filter((s) => s.addInstances.some((id) => ids.includes(id)) || s.hardware.some((h) => h.componentId === comp.id));
+      // Step first: a step change resets highlights on the client, so highlight after it.
+      if (usedIn[0]) act({ name: "go_to_step", input: { step: usedIn[0].id } });
+      if (ids.length) act({ name: "highlight_parts", input: { instanceIds: ids } });
+      act({ name: "set_exploded", input: { enabled: ids.length > 0 && !comp.isHardware } });
+      return say(
+        `${comp.name}${comp.label ? ` (${comp.label})` : ""}: ${comp.description || "see the highlighted part in the 3D view."} There ${comp.qty === 1 ? "is one" : `are ${comp.qty}`} in the box${usedIn.length ? `, used in step${usedIn.length > 1 ? "s" : ""} ${usedIn.map((s) => s.id).join(", ")}` : ""}. I've highlighted it for you.`,
+      );
+    }
+    case "tools":
+      return toolsAnswer();
+    case "duration":
+      return say(
+        `Plan on about ${plan.product.estimatedMinutes} minutes with ${plan.product.peopleNeeded === 1 ? "one person" : `${plan.product.peopleNeeded} people`}. ${step ? `Step ${step.id} should take around ${Math.max(1, Math.round(step.durationMinutes))} minutes.` : ""}`,
+      );
+    case "safety":
+      return say(`Key safety notes: ${plan.safety.join(" ")}${step?.warnings.length ? ` For this step: ${step.warnings.join(" ")}` : ""}`);
+    case "step_parts":
+      return stepParts();
+    case "explode":
+      act({ name: "set_exploded", input: { enabled: true } });
+      return say("Here's the exploded view so you can see how the parts fit together.");
+    case "repeat":
+      return say(step ? step.voiceScript : "Pick a step and I'll read it to you.");
+    case "fallback":
+      return say(
+        `I'm running in demo mode without an API key, so I can only answer from the plan itself. ${step ? `Right now you're on step ${step.id}: ${step.voiceScript}` : ""} Try asking "where does part A go", "what tools do I need", or "go to step 3". Add an ANTHROPIC_API_KEY to chat with Claude about the actual manual.`,
+      );
   }
-  if (/how long|time|minutes|hours/.test(q)) {
-    return say(`Plan on about ${plan.product.estimatedMinutes} minutes with ${plan.product.peopleNeeded === 1 ? "one person" : `${plan.product.peopleNeeded} people`}. ${step ? `Step ${step.id} should take around ${Math.max(1, Math.round(step.durationMinutes))} minutes.` : ""}`);
-  }
-  if (/safety|warning|danger|careful/.test(q)) {
-    return say(`Key safety notes: ${plan.safety.join(" ")}${step?.warnings.length ? ` For this step: ${step.warnings.join(" ")}` : ""}`);
-  }
-  if (step && /(parts|hardware|need|which screws|what do i need)/.test(q)) {
-    const hw = describeHardware(plan, step);
-    act({ name: "highlight_parts", input: { instanceIds: step.addInstances } });
-    return say(`For step ${step.id} you need ${hw || "no hardware"}${step.tools.length ? `, plus ${step.tools.join(" and ")}` : ""}. Parts added: ${step.addInstances.length ? step.addInstances.map((id) => plan.instances.find((i) => i.id === id)?.label || id).join(", ") : "none"}.`);
-  }
-  if (/explode|exploded|spread/.test(q)) {
-    act({ name: "set_exploded", input: { enabled: true } });
-    return say("Here's the exploded view so you can see how the parts fit together.");
-  }
-  if (/repeat|again|what do i do/.test(q) && step) {
-    return say(step.voiceScript);
-  }
-  return say(
-    `I'm running in demo mode without an API key, so I can only answer from the plan itself. ${step ? `Right now you're on step ${step.id}: ${step.voiceScript}` : ""} Try asking "where does part A go", "what tools do I need", or "go to step 3". Add an ANTHROPIC_API_KEY to chat with Claude about the actual manual.`,
-  );
 }
 
 /**
@@ -347,7 +404,7 @@ export async function runMockChat(ctx: ChatContext, emit: Emit): Promise<void> {
  * longest match first; labels match on their own only when they are longer
  * than one character, otherwise only as "part A" so the article "a" never matches.
  */
-export function findComponentInQuestion(plan: AssemblyPlan, q: string): AssemblyPlan["components"][number] | undefined {
+export function findComponentInQuestion(plan: AssemblyPlan, q: string): Component | undefined {
   const byName = plan.components
     .filter((c) => c.name.trim() && new RegExp(`\\b${escapeRe(c.name.toLowerCase())}s?\\b`).test(q))
     .sort((a, b) => b.name.length - a.name.length);

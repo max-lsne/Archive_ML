@@ -144,11 +144,30 @@ const MAX_REDIRECTS = 5;
  * checks the name first, but a rebinding host can answer public there and private
  * for the actual connection; pinning the check into the dialer closes that gap.
  */
+function proxyEnv(): string | undefined {
+  return process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
+}
+
+/** Hostnames of the configured proxies: connections to them are ours, not the user's link, so they skip the guard. */
+function proxyHosts(): Set<string> {
+  const hosts = new Set<string>();
+  for (const v of [process.env.HTTPS_PROXY, process.env.https_proxy, process.env.HTTP_PROXY, process.env.http_proxy]) {
+    if (!v) continue;
+    try {
+      hosts.add(new URL(v).hostname.replace(/^\[|\]$/g, "").toLowerCase());
+    } catch {
+      /* unparsable proxy value: ignore */
+    }
+  }
+  return hosts;
+}
+
 const guardedLookup: net.LookupFunction = (hostname, options, callback) => {
   dnsCallback.lookup(hostname, options, (err, address, family) => {
     if (err) return callback(err, address, family);
     const addresses = Array.isArray(address) ? address.map((a) => a.address) : [address];
-    if (!config.allowPrivateUrls && addresses.some((a) => typeof a === "string" && isPrivateAddress(a))) {
+    const isProxy = proxyHosts().has(hostname.toLowerCase());
+    if (!config.allowPrivateUrls && !isProxy && addresses.some((a) => typeof a === "string" && isPrivateAddress(a))) {
       const refused: NodeJS.ErrnoException = new Error(`${hostname} resolves to a private network address`);
       refused.code = "EPRIVATEADDR";
       return callback(refused, address, family);
@@ -160,10 +179,12 @@ const guardedLookup: net.LookupFunction = (hostname, options, callback) => {
 let dispatcher: Dispatcher | undefined;
 function getDispatcher(): Dispatcher {
   if (dispatcher) return dispatcher;
-  const proxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
-  // Behind a proxy the proxy resolves names (so rebinding can't steer our socket);
-  // honouring HTTPS_PROXY here also removes the need for NODE_USE_ENV_PROXY.
-  dispatcher = proxy ? new EnvHttpProxyAgent() : new Agent({ connect: { lookup: guardedLookup } });
+  // Honouring HTTPS_PROXY here removes the need for NODE_USE_ENV_PROXY. The proxy
+  // agent still dials NO_PROXY hosts directly, so the guarded lookup goes on both
+  // (connections to the proxy itself are exempted inside guardedLookup).
+  dispatcher = proxyEnv()
+    ? new EnvHttpProxyAgent({ connect: { lookup: guardedLookup } })
+    : new Agent({ connect: { lookup: guardedLookup } });
   return dispatcher;
 }
 
@@ -171,9 +192,20 @@ function getDispatcher(): Dispatcher {
  * Fetch with manual redirect handling so every hop goes through the
  * private-host check (a public URL may 30x to an internal address).
  */
-async function fetchBytes(url: string, maxBytes: number, accept = "*/*"): Promise<Fetched> {
+/** Raised when the caller's signal (project deleted) cancels a fetch. */
+export class FetchCancelled extends FetchError {
+  constructor() {
+    super("Cancelled.");
+    this.name = "FetchCancelled";
+  }
+}
+
+async function fetchBytes(url: string, maxBytes: number, accept = "*/*", signal?: AbortSignal): Promise<Fetched> {
+  if (signal?.aborted) throw new FetchCancelled();
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), config.fetchTimeoutMs);
+  // The per-request timeout and the caller's cancellation both abort the fetch.
+  const combined = signal ? AbortSignal.any([ctrl.signal, signal]) : ctrl.signal;
   let current = new URL(url);
   try {
     for (let hop = 0; ; hop++) {
@@ -181,7 +213,7 @@ async function fetchBytes(url: string, maxBytes: number, accept = "*/*"): Promis
       const res = await undiciFetch(current, {
         dispatcher: getDispatcher(),
         redirect: "manual",
-        signal: ctrl.signal,
+        signal: combined,
         headers: {
           "User-Agent": USER_AGENT,
           Accept: accept,
@@ -232,6 +264,7 @@ async function fetchBytes(url: string, maxBytes: number, accept = "*/*"): Promis
     }
   } catch (e) {
     if (e instanceof FetchError) throw e;
+    if (signal?.aborted) throw new FetchCancelled();
     const msg = e instanceof Error ? e.message : String(e);
     if (/abort/i.test(msg)) throw new FetchError("Timed out fetching the link.");
     // undici wraps network errors in a bare "fetch failed"; surface the real cause.
@@ -400,9 +433,9 @@ function fileNameFromUrl(url: string): string {
   }
 }
 
-async function fetchImage(url: string): Promise<ImageDoc | null> {
+async function fetchImage(url: string, signal?: AbortSignal): Promise<ImageDoc | null> {
   try {
-    const f = await fetchBytes(url, 6 * 1024 * 1024, "image/*");
+    const f = await fetchBytes(url, 6 * 1024 * 1024, "image/*", signal);
     const ct = f.contentType.split(";")[0].trim();
     const allowed = ["image/jpeg", "image/png", "image/gif", "image/webp"] as const;
     const mediaType = (allowed as readonly string[]).includes(ct)
@@ -416,7 +449,8 @@ async function fetchImage(url: string): Promise<ImageDoc | null> {
             : null;
     if (!mediaType || f.bytes.length < 2000) return null;
     return { url, mediaType, bytes: f.bytes };
-  } catch {
+  } catch (e) {
+    if (e instanceof FetchCancelled) throw e;
     return null;
   }
 }
@@ -427,6 +461,7 @@ async function fetchImage(url: string): Promise<ImageDoc | null> {
 export async function gatherDocumentation(
   input: string,
   onProgress: (message: string) => void,
+  signal?: AbortSignal,
 ): Promise<Gathered> {
   const url = normalizeUrl(input);
   const warnings: string[] = [];
@@ -435,7 +470,7 @@ export async function gatherDocumentation(
   const images: ImageDoc[] = [];
 
   onProgress(`Fetching ${url.hostname}…`);
-  const main = await fetchBytes(url.toString(), config.maxPdfBytes + 2 * 1024 * 1024, "text/html,application/pdf,*/*");
+  const main = await fetchBytes(url.toString(), config.maxPdfBytes + 2 * 1024 * 1024, "text/html,application/pdf,*/*", signal);
 
   let pageTitle = "";
   let pageDescription = "";
@@ -467,7 +502,7 @@ export async function gatherDocumentation(
       if (pdfs.length >= MAX_PDFS) break;
       onProgress(`Downloading manual ${pdfs.length + 1}/${Math.min(MAX_PDFS, attempts.length)}: ${fileNameFromUrl(cand.url)}${i > pdfs.length ? ` (candidate ${i + 1})` : ""}`);
       try {
-        const f = await fetchBytes(cand.url, config.maxPdfBytes, "application/pdf,*/*");
+        const f = await fetchBytes(cand.url, config.maxPdfBytes, "application/pdf,*/*", signal);
         if (!isPdf(f.contentType, f.bytes, f.finalUrl)) {
           warnings.push(`${fileNameFromUrl(cand.url)} was not a PDF.`);
           continue;
@@ -476,18 +511,19 @@ export async function gatherDocumentation(
         pdfs.push(pdf);
         sources.push({ kind: "pdf", url: f.finalUrl, title: pdf.title, size: pdf.bytes.length, pages: pdf.pages });
       } catch (e) {
+        if (e instanceof FetchCancelled) throw e;
         warnings.push(`Could not download ${fileNameFromUrl(cand.url)}: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
 
-    // A few product photos help Claude understand the finished object.
+    // A few product photos help Claude understand the finished object. Fetched
+    // one at a time and stopped at three, so nothing is downloaded only to be dropped.
+    const MAX_IMAGES = 3;
     const imgUrls = [...new Set([page.ogImage, ...page.imageCandidates].filter((u): u is string => Boolean(u)))].slice(0, 5);
-    if (imgUrls.length) {
-      const settled = await Promise.allSettled(imgUrls.map((u) => fetchImage(u)));
-      for (const r of settled) {
-        if (images.length >= 3) break;
-        if (r.status === "fulfilled" && r.value) images.push(r.value);
-      }
+    for (const u of imgUrls) {
+      if (images.length >= MAX_IMAGES) break;
+      const img = await fetchImage(u, signal);
+      if (img) images.push(img);
     }
     if (!imageUrl && images[0]) imageUrl = images[0].url;
   } else {
