@@ -6,7 +6,9 @@
 import * as cheerio from "cheerio";
 import { extractText } from "unpdf";
 import dns from "node:dns/promises";
+import dnsCallback from "node:dns";
 import net from "node:net";
+import { Agent, EnvHttpProxyAgent, fetch as undiciFetch, type Dispatcher } from "undici";
 import { config } from "./config.js";
 import { log } from "./logger.js";
 import type { SourceDoc } from "../../shared/project.js";
@@ -95,7 +97,8 @@ export function isPrivateAddress(ip: string): boolean {
     }
     return true;
   }
-  return v6 === "::1" || v6 === "::" || v6.startsWith("fc") || v6.startsWith("fd") || v6.startsWith("fe80");
+  // ::1 loopback, :: unspecified, fc00::/7 unique-local, fe80::/10 link-local.
+  return v6 === "::1" || v6 === "::" || v6.startsWith("fc") || v6.startsWith("fd") || /^fe[89ab]/.test(v6);
 }
 
 /**
@@ -137,6 +140,34 @@ interface Fetched {
 const MAX_REDIRECTS = 5;
 
 /**
+ * DNS resolution that refuses private addresses at connect time. assertPublicHost
+ * checks the name first, but a rebinding host can answer public there and private
+ * for the actual connection; pinning the check into the dialer closes that gap.
+ */
+const guardedLookup: net.LookupFunction = (hostname, options, callback) => {
+  dnsCallback.lookup(hostname, options, (err, address, family) => {
+    if (err) return callback(err, address, family);
+    const addresses = Array.isArray(address) ? address.map((a) => a.address) : [address];
+    if (!config.allowPrivateUrls && addresses.some((a) => typeof a === "string" && isPrivateAddress(a))) {
+      const refused: NodeJS.ErrnoException = new Error(`${hostname} resolves to a private network address`);
+      refused.code = "EPRIVATEADDR";
+      return callback(refused, address, family);
+    }
+    callback(null, address, family);
+  });
+};
+
+let dispatcher: Dispatcher | undefined;
+function getDispatcher(): Dispatcher {
+  if (dispatcher) return dispatcher;
+  const proxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
+  // Behind a proxy the proxy resolves names (so rebinding can't steer our socket);
+  // honouring HTTPS_PROXY here also removes the need for NODE_USE_ENV_PROXY.
+  dispatcher = proxy ? new EnvHttpProxyAgent() : new Agent({ connect: { lookup: guardedLookup } });
+  return dispatcher;
+}
+
+/**
  * Fetch with manual redirect handling so every hop goes through the
  * private-host check (a public URL may 30x to an internal address).
  */
@@ -147,7 +178,8 @@ async function fetchBytes(url: string, maxBytes: number, accept = "*/*"): Promis
   try {
     for (let hop = 0; ; hop++) {
       await assertPublicHost(current);
-      const res = await fetch(current, {
+      const res = await undiciFetch(current, {
+        dispatcher: getDispatcher(),
         redirect: "manual",
         signal: ctrl.signal,
         headers: {
@@ -204,6 +236,7 @@ async function fetchBytes(url: string, maxBytes: number, accept = "*/*"): Promis
     if (/abort/i.test(msg)) throw new FetchError("Timed out fetching the link.");
     // undici wraps network errors in a bare "fetch failed"; surface the real cause.
     const cause = (e as { cause?: { code?: string; message?: string } }).cause;
+    if (cause?.code === "EPRIVATEADDR") throw new FetchError("Links to private network addresses are not allowed.");
     const detail = cause?.code || cause?.message;
     throw new FetchError(`Could not fetch the link (${detail ? `${msg}: ${detail}` : msg}).${detail === "ENOTFOUND" ? " Check the address and your network/proxy settings." : ""}`);
   } finally {
@@ -214,7 +247,7 @@ async function fetchBytes(url: string, maxBytes: number, accept = "*/*"): Promis
 function isPdf(contentType: string, bytes: Buffer, url: string): boolean {
   if (contentType.includes("application/pdf")) return true;
   if (bytes.subarray(0, 5).toString("latin1") === "%PDF-") return true;
-  return /\.pdf(\?|#|$)/i.test(url) && !contentType.includes("text/html");
+  return looksLikePdfUrl(url) && !contentType.includes("text/html");
 }
 
 // ---------------------------------------------------------------------------
@@ -233,7 +266,7 @@ export function scorePdfCandidate(url: string, anchorText: string): number {
   let score = 0;
   const u = url.toLowerCase();
   const t = anchorText.toLowerCase();
-  if (/\.pdf(\?|#|$)/.test(u)) score += 2;
+  if (looksLikePdfUrl(u)) score += 2;
   if (POSITIVE.test(t)) score += 5;
   if (POSITIVE.test(u)) score += 4;
   if (/assembly[_-]?instructions|\/aa-\d{5,}|aa-\d{5,}/.test(u)) score += 6; // IKEA style
@@ -302,7 +335,7 @@ export function parseHtml(html: string, baseUrl: string): ParsedPage {
     const text = $(el).text().replace(/\s+/g, " ").trim() || $(el).attr("aria-label") || $(el).attr("title") || "";
     const url = abs(href);
     if (!url) return;
-    if (/\.pdf(\?|#|$)/i.test(url) || POSITIVE.test(text)) addCandidate(url, text);
+    if (looksLikePdfUrl(url) || POSITIVE.test(text)) addCandidate(url, text);
   });
   // ... and from anywhere in the raw markup (embedded JSON, data attributes)
   const rawRe = /https?:\\?\/\\?\/[^\s"'<>)]+?\.pdf(?:\?[^\s"'<>)]*)?/gi;
@@ -315,7 +348,7 @@ export function parseHtml(html: string, baseUrl: string): ParsedPage {
     const url = abs(m[1]);
     if (url && !candidates.has(url)) addCandidate(url, "");
   }
-  const pdfCandidates = rankPdfCandidates([...candidates.values()].filter((c) => /\.pdf(\?|#|$)/i.test(c.url) || c.score >= 5));
+  const pdfCandidates = rankPdfCandidates([...candidates.values()].filter((c) => looksLikePdfUrl(c.url) || c.score >= 5));
 
   // Product images (skip icons/logos/sprites)
   const imgs: string[] = [];

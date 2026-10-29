@@ -11,7 +11,8 @@ export interface ChatContext {
   plan: AssemblyPlan;
   history: ChatMessage[];
   stepIndex: number;
-  manual?: { title: string; bytes: Buffer };
+  /** Manual PDF already base64-encoded (cached per project by the route). */
+  manual?: { title: string; data: string };
   /** Aborted when the browser disconnects; stops the model call and the tool loop. */
   signal?: AbortSignal;
 }
@@ -151,7 +152,7 @@ export async function runClaudeChat(ctx: ChatContext, emit: Emit): Promise<void>
           type: "document",
           title: ctx.manual.title,
           context: "The original assembly manual. Mostly diagrams; refer to it when asked about a page or a detail.",
-          source: { type: "base64", media_type: "application/pdf", data: ctx.manual.bytes.toString("base64") },
+          source: { type: "base64", media_type: "application/pdf", data: ctx.manual.data },
           cache_control: { type: "ephemeral" },
         },
         { type: "text", text: "Here is the original assembly manual for reference." },
@@ -177,6 +178,10 @@ export async function runClaudeChat(ctx: ChatContext, emit: Emit): Promise<void>
     fullText += text;
     emit({ type: "text", text });
   };
+  // Constant for the whole request (and the stable, cached prefix of every turn).
+  const system: Anthropic.Beta.BetaTextBlockParam[] = [
+    { type: "text", text: chatSystem(plan, Boolean(ctx.manual)), cache_control: { type: "ephemeral" } },
+  ];
 
   for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
     if (signal?.aborted) return; // the browser is gone; end quietly
@@ -189,7 +194,7 @@ export async function runClaudeChat(ctx: ChatContext, emit: Emit): Promise<void>
         betas: ["server-side-fallback-2026-07-01"],
         fallbacks: "default",
         cache_control: { type: "ephemeral" },
-        system: [{ type: "text", text: chatSystem(plan, Boolean(ctx.manual)), cache_control: { type: "ephemeral" } }],
+        system,
         tools: TOOLS,
         messages,
       },

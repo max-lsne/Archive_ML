@@ -30,7 +30,9 @@ export function getClient(): Anthropic {
   return client;
 }
 
-const PLAN_FORMAT = betaZodOutputFormat(AssemblyPlanSchema);
+// Only the JSON schema is sent. The helper's own `parse` would make finalMessage()
+// reject on truncated or refused output before stop_reason can be inspected.
+const PLAN_SCHEMA = betaZodOutputFormat(AssemblyPlanSchema).schema;
 
 export class ClaudePlanner implements Planner {
   async generate(gathered: Gathered, notes: string, onProgress: PlannerProgress): Promise<PlanResult> {
@@ -101,7 +103,7 @@ export class ClaudePlanner implements Planner {
       max_tokens: 64000,
       // Opus 5.5 always thinks; effort is the depth control. Fallbacks re-run a
       // (rare) safety decline on Anthropic's recommended substitute model.
-      output_config: { effort: config.effort, format: PLAN_FORMAT },
+      output_config: { effort: config.effort, format: { type: "json_schema", schema: PLAN_SCHEMA } },
       betas: ["server-side-fallback-2026-07-01"],
       fallbacks: "default",
       system: PLANNER_SYSTEM,
@@ -143,15 +145,11 @@ export class ClaudePlanner implements Planner {
       throw new Error("The plan was too long to finish. Try a product with a shorter manual, or split it in two.");
     }
 
-    let raw: unknown = message.parsed_output ?? null;
-    if (!raw) {
-      const text = message.content
-        .filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === "text")
-        .map((b) => b.text)
-        .join("");
-      raw = parseLooseJson(text);
-    }
-    const plan = normalizePlan(raw);
+    const text = message.content
+      .filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("");
+    const plan = normalizePlan(parseLooseJson(text));
     if (!plan.steps.length || !plan.instances.length) {
       throw new Error("Claude returned a plan with no steps or parts. Please try again.");
     }

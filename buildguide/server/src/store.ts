@@ -108,9 +108,14 @@ export async function listProjects(): Promise<ProjectSummary[]> {
 
 export async function deleteProject(id: string): Promise<boolean> {
   if (!isValidId(id)) return false;
-  const existed = projects.has(id) || Boolean(await readProjectFile(id));
+  const current = projects.get(id) ?? (await readProjectFile(id));
+  const existed = Boolean(current);
   tombstones.add(id);
   projects.delete(id);
+  // Let open /events streams finish instead of pinging a deleted project forever.
+  if (current) {
+    emitter.emit(`project:${id}`, { ...current, status: "error", error: "Project deleted", progress: "Deleted", plan: undefined } satisfies Project);
+  }
   try {
     await fs.rm(projectDir(id), { recursive: true, force: true });
     return existed;

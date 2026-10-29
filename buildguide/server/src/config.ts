@@ -10,10 +10,14 @@ try {
 }
 
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
-type Effort = (typeof EFFORTS)[number];
+export type Effort = (typeof EFFORTS)[number];
 
-function effort(v: string | undefined): Effort {
-  return (EFFORTS as readonly string[]).includes(v ?? "") ? (v as Effort) : "high";
+/** Parse an effort level from the environment; unknown values fall back loudly, never silently upward. */
+export function parseEffort(v: string | undefined, fallback: Effort, name = "effort"): Effort {
+  if (v === undefined || v === "") return fallback;
+  if ((EFFORTS as readonly string[]).includes(v)) return v as Effort;
+  console.warn(`[config] ignoring unknown ${name} "${v}" (expected one of ${EFFORTS.join(", ")}); using "${fallback}"`);
+  return fallback;
 }
 
 /**
@@ -55,8 +59,8 @@ export const config = {
   port: Number(process.env.PORT ?? 8787),
   dataDir: path.resolve(process.env.BUILDGUIDE_DATA_DIR ?? "./data"),
   model: process.env.BUILDGUIDE_MODEL ?? "claude-opus-5-5",
-  effort: effort(process.env.BUILDGUIDE_EFFORT),
-  chatEffort: effort(process.env.BUILDGUIDE_CHAT_EFFORT ?? "low"),
+  effort: parseEffort(process.env.BUILDGUIDE_EFFORT, "high", "BUILDGUIDE_EFFORT"),
+  chatEffort: parseEffort(process.env.BUILDGUIDE_CHAT_EFFORT, "low", "BUILDGUIDE_CHAT_EFFORT"),
   mock: process.env.MOCK_CLAUDE === "1" || process.env.MOCK_CLAUDE === "true",
   /** Claude is reachable: an API key / auth token in the environment, or an `ant auth login` profile on disk. */
   hasCredentials: Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN) || hasProfileCredentials(),

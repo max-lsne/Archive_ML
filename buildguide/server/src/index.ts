@@ -18,12 +18,12 @@ import {
   summarize,
   touchProject,
 } from "./store.js";
-import { FetchError, gatherDocumentation } from "./fetcher.js";
+import { FetchError, gatherDocumentation, hostIsPrivateLiteral, normalizeUrl } from "./fetcher.js";
 import { createPlanner } from "./planner.js";
 import { runClaudeChat, runMockChat, type ChatContext } from "./chat.js";
 import { SAMPLE_PLANS, findSample } from "../../shared/samples/index.js";
 import { normalizePlan } from "../../shared/plan.js";
-import type { ChatMessage, Project } from "../../shared/project.js";
+import { pickManualIndex, type ChatMessage, type Project } from "../../shared/project.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -40,6 +40,8 @@ app.get("/api/config", (_req, res) => {
     hasApiKey: config.hasCredentials,
     mock: config.mock,
     liveGeneration: config.hasCredentials || config.mock,
+    /** Who answers in the chat panel for non-sample projects. */
+    chatBackend: config.hasCredentials && !config.mock ? "claude" : "demo",
     allowPrivateUrls: config.allowPrivateUrls,
     model: config.model,
     effort: config.effort,
@@ -58,6 +60,17 @@ app.post("/api/projects", async (req, res) => {
   const url = typeof req.body?.url === "string" ? req.body.url.trim() : "";
   const notes = typeof req.body?.notes === "string" ? req.body.notes.slice(0, 2000) : "";
   if (!url) return res.status(400).json({ error: "Paste a link to the product page or its assembly manual." });
+  // Validate before persisting anything: a bad link is a 400, not an error project.
+  let target: URL;
+  try {
+    target = normalizeUrl(url);
+    if (!config.allowPrivateUrls && hostIsPrivateLiteral(target.hostname) === true) {
+      throw new FetchError("Links to local or private network addresses are not allowed.");
+    }
+  } catch (e) {
+    if (e instanceof FetchError) return res.status(400).json({ error: e.message });
+    throw e;
+  }
   if (!config.hasCredentials && !config.mock) {
     return res.status(503).json({
       error:
@@ -67,7 +80,7 @@ app.post("/api/projects", async (req, res) => {
   const now = new Date().toISOString();
   const project: Project = {
     id: randomUUID().slice(0, 12),
-    url,
+    url: target.toString(),
     notes,
     createdAt: now,
     updatedAt: now,
@@ -177,6 +190,7 @@ app.get("/api/projects/:id/events", async (req, res) => {
 });
 
 app.delete("/api/projects/:id", async (req, res) => {
+  manualCache.delete(req.params.id);
   const ok = await deleteProject(req.params.id);
   res.status(ok ? 204 : 404).end();
 });
@@ -193,6 +207,34 @@ app.get("/api/projects/:id/manual/:index", async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // Chat (SSE over POST)
+
+// The manual is identical on every chat turn: keep a few base64 copies around
+// instead of re-reading and re-encoding up to 20 MB per message.
+const MANUAL_CACHE_MAX = 6;
+const manualCache = new Map<string, { title: string; data: string; bytes: number }>();
+
+async function cachedManual(p: Project): Promise<{ title: string; data: string } | undefined> {
+  const hit = manualCache.get(p.id);
+  if (hit) {
+    manualCache.delete(p.id); // refresh LRU position
+    manualCache.set(p.id, hit);
+    return hit;
+  }
+  const idx = pickManualIndex(p.sources);
+  if (idx < 0) return undefined;
+  const source = p.sources.filter((s) => s.kind === "pdf")[idx];
+  const bytes = await readManual(p.id, idx);
+  // Same payload rule as the planner: a PDF that doesn't fit the request stays out.
+  if (!source || !bytes || bytes.length > config.maxAttachPdfBytes) return undefined;
+  const entry = { title: source.title, data: bytes.toString("base64"), bytes: bytes.length };
+  manualCache.set(p.id, entry);
+  while (manualCache.size > MANUAL_CACHE_MAX) {
+    const oldest = manualCache.keys().next().value;
+    if (oldest === undefined) break;
+    manualCache.delete(oldest);
+  }
+  return entry;
+}
 
 app.post("/api/projects/:id/chat", async (req, res) => {
   const p = await getProject(req.params.id);
@@ -213,15 +255,7 @@ app.post("/api/projects/:id/chat", async (req, res) => {
   res.on("close", () => abort.abort());
   const ctx: ChatContext = { plan: p.plan, history, stepIndex, signal: abort.signal };
   const useClaude = config.hasCredentials && !config.mock && !p.demo;
-  if (useClaude && config.chatIncludesManual) {
-    const pdfIndex = p.sources.findIndex((s) => s.kind === "pdf" && s.sentAsDocument !== false);
-    if (pdfIndex >= 0) {
-      const pdfOrdinal = p.sources.filter((s) => s.kind === "pdf").findIndex((s) => s === p.sources[pdfIndex]);
-      const bytes = await readManual(p.id, pdfOrdinal);
-      // Same payload rule as the planner: a PDF that doesn't fit the request stays out.
-      if (bytes && bytes.length <= config.maxAttachPdfBytes) ctx.manual = { title: p.sources[pdfIndex].title, bytes };
-    }
-  }
+  if (useClaude && config.chatIncludesManual) ctx.manual = await cachedManual(p);
   try {
     if (useClaude) await runClaudeChat(ctx, (ev) => sse.data(ev));
     else await runMockChat(ctx, (ev) => sse.data(ev));
@@ -258,8 +292,11 @@ app.use((req, res) => {
 
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   const message = err instanceof Error ? err.message : String(err);
-  log.error("unhandled:", message);
-  if (!res.headersSent) res.status(500).json({ error: message });
+  // body-parser and friends attach a status (400 for malformed JSON, 413 for oversized bodies).
+  const status = typeof (err as { status?: unknown })?.status === "number" ? (err as { status: number }).status : 500;
+  if (status >= 500) log.error("unhandled:", message);
+  else log.warn(`client error ${status}:`, message);
+  if (!res.headersSent) res.status(status).json({ error: message });
 });
 
 app.listen(config.port, () => {

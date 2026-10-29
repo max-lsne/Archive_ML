@@ -57,7 +57,6 @@ All optional, see `.env.example`:
 | `PORT` | `8787` | Server port |
 | `MOCK_CLAUDE` | – | `1` = canned plans, no API calls |
 | `BUILDGUIDE_ALLOW_PRIVATE_URLS` | – | `1` = allow localhost/private links (testing only) |
-| `NODE_USE_ENV_PROXY` | – | `1` makes Node's fetch honour `HTTPS_PROXY` |
 
 ## How the Claude integration works
 
@@ -90,6 +89,8 @@ npm run smoke                              # needs playwright (npm i -D playwrig
 The smoke test opens both samples, steps through them, explodes the model, highlights parts, exercises the chat and saves screenshots to `scripts/out/`.
 
 ## Notes and limits
+
+- Corporate proxy: the fetcher honours `HTTPS_PROXY` / `HTTP_PROXY` itself (no `NODE_USE_ENV_PROXY` needed). Without a proxy it resolves hostnames once and refuses to connect to private addresses, so a public name that rebinds to an internal IP cannot be fetched.
 
 - Browser support for voice: speech synthesis works in all major browsers; speech **recognition** (hands-free mode and the mic button) needs Chrome, Edge or Safari.
 - Some retailers block automated access. If a product page fails, paste a direct link to the instructions PDF.

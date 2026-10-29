@@ -133,3 +133,10 @@ describe("parseLooseJson", () => {
     expect(parseLooseJson('Here you go: {"a":[1,2]} hope that helps')).toEqual({ a: [1, 2] });
   });
 });
+
+describe("isPrivateAddress IPv6 link-local", () => {
+  it("covers the whole fe80::/10 block, not just fe80", () => {
+    for (const ip of ["fe80::1", "fe90::1", "fea0::dead", "febf::1"]) expect(isPrivateAddress(ip), ip).toBe(true);
+    for (const ip of ["fec0::1", "fe00::1", "2606:4700::1111"]) expect(isPrivateAddress(ip), ip).toBe(false);
+  });
+});
