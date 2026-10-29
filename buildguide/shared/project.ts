@@ -76,10 +76,13 @@ export type ChatEvent =
  * Returns -1 when the project has no PDF. Used by both the chat route and the
  * step card so the assistant and the "Manual p.N" links agree.
  */
-export function pickManualIndex(sources: SourceDoc[]): number {
+export function pickManualIndex(sources: SourceDoc[], opts: { attachedOnly?: boolean } = {}): number {
   const pdfs = sources.filter((s) => s.kind === "pdf");
   if (!pdfs.length) return -1;
   const eligible = pdfs.filter((s) => s.sentAsDocument !== false);
+  // attachedOnly: callers that will send the PDF to Claude must not fall back to
+  // a document the planner deliberately did not attach (too large or too long).
+  if (!eligible.length && opts.attachedOnly) return -1;
   const pool = eligible.length ? eligible : pdfs;
   let best = pool[0];
   for (const s of pool) if ((s.pages ?? 0) > (best.pages ?? 0)) best = s;
