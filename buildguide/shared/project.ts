@@ -76,8 +76,13 @@ export type ChatEvent =
  * Returns -1 when the project has no PDF. Used by both the chat route and the
  * step card so the assistant and the "Manual p.N" links agree.
  */
+/** PDF sources in order; the index in this list matches the stored manual-N.pdf file. */
+export function pdfSources(sources: SourceDoc[]): SourceDoc[] {
+  return sources.filter((s) => s.kind === "pdf");
+}
+
 export function pickManualIndex(sources: SourceDoc[], opts: { attachedOnly?: boolean } = {}): number {
-  const pdfs = sources.filter((s) => s.kind === "pdf");
+  const pdfs = pdfSources(sources);
   if (!pdfs.length) return -1;
   const eligible = pdfs.filter((s) => s.sentAsDocument !== false);
   // attachedOnly: callers that will send the PDF to Claude must not fall back to
@@ -103,6 +108,8 @@ export interface PdfAttachLimits {
  */
 export function canAttachPdf(bytes: number, pages: number | undefined, limits: PdfAttachLimits): boolean {
   if (bytes <= 0 || bytes > limits.maxAttachPdfBytes) return false;
-  if (pages === undefined || pages <= 0) return false;
+  // An unknown page count (pdfjs could not parse a file that still carries the
+  // %PDF magic) is attached: Claude's reader is more tolerant than pdfjs.
+  if (pages === undefined || pages <= 0) return true;
   return pages <= limits.maxPdfPages;
 }

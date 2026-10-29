@@ -293,15 +293,24 @@ export function normalizePlan(input: unknown): AssemblyPlan {
   const instances: Instance[] = [];
   const instanceIds = new Set<string>();
   const byComponent = new Map(components.map((c) => [c.id, c] as const));
+
+  /** Resolve a reference that may be a component id, a manual label or a name. */
+  const resolveComponentId = (ref: string): string | null => {
+    const asId = slug(ref, "");
+    if (asId && byComponent.has(asId)) return asId;
+    const needle = ref.trim().toLowerCase();
+    if (!needle) return null;
+    const hit = components.find((c) => (c.label && c.label.toLowerCase() === needle) || c.name.toLowerCase() === needle);
+    return hit ? hit.id : null;
+  };
+
   for (const [i, i0] of (Array.isArray(raw.instances) ? raw.instances : []).entries()) {
     const inst = (i0 && typeof i0 === "object" ? i0 : {}) as Record<string, unknown>;
     let componentId = slug(str(inst.componentId), "");
     if (!byComponent.has(componentId)) {
-      // Try to recover: match by label/name, else create a placeholder component.
-      const guess = components.find(
-        (c) => c.label && c.label.toLowerCase() === str(inst.componentId).toLowerCase(),
-      );
-      if (guess) componentId = guess.id;
+      // Try to recover by label or name, else create a placeholder component.
+      const resolved = resolveComponentId(str(inst.componentId));
+      if (resolved) componentId = resolved;
       else {
         const placeholder: Component = {
           id: componentId || `unknown_${i + 1}`,
@@ -334,26 +343,19 @@ export function normalizePlan(input: unknown): AssemblyPlan {
     });
   }
 
-  /** Resolve a reference that may be a component id, a manual label or a name. */
-  const resolveComponentId = (ref: string): string | null => {
-    const asId = slug(ref, "");
-    if (asId && byComponent.has(asId)) return asId;
-    const needle = ref.trim().toLowerCase();
-    if (!needle) return null;
-    const hit = components.find((c) => c.label.toLowerCase() === needle || c.name.toLowerCase() === needle);
-    return hit ? hit.id : null;
-  };
-
   // Steps
   const steps: Step[] = [];
   const added = new Set<string>();
   const rawSteps = Array.isArray(raw.steps) ? raw.steps : [];
   for (const [i, s0] of rawSteps.entries()) {
     const s = (s0 && typeof s0 === "object" ? s0 : {}) as Record<string, unknown>;
-    const addInstances = strArray(s.addInstances)
-      .map((x) => slug(x, ""))
-      .filter((x) => instanceIds.has(x) && !added.has(x));
-    for (const x of addInstances) added.add(x);
+    const addInstances: string[] = [];
+    for (const x of strArray(s.addInstances).map((x) => slug(x, ""))) {
+      if (instanceIds.has(x) && !added.has(x)) {
+        added.add(x);
+        addInstances.push(x);
+      }
+    }
     const focus = strArray(s.focusInstanceIds)
       .map((x) => slug(x, ""))
       .filter((x) => instanceIds.has(x));

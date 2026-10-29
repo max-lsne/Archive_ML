@@ -74,6 +74,17 @@ describe("normalizePlan", () => {
     expect(plan.instances[0].componentId).toBe("side_panel");
   });
 
+  it("resolves instance references by name and dedupes repeated ids in a step", () => {
+    const plan = normalizePlan({
+      components: [{ id: "panel_side", name: "Side panel", label: "" }],
+      instances: [{ id: "s1", componentId: "Side panel" }],
+      steps: [{ title: "s", addInstances: ["s1", "s1"] }],
+    });
+    expect(plan.components).toHaveLength(1);
+    expect(plan.instances[0].componentId).toBe("panel_side");
+    expect(plan.steps[0].addInstances).toEqual(["s1"]);
+  });
+
   it("accepts short and bare hex colours", () => {
     const plan = normalizePlan({ components: [{ id: "a", color: "#abc" }, { id: "b", color: "aabbcc" }, { id: "c", material: "metal" }] });
     expect(plan.components.map((c) => c.color)).toEqual(["#aabbcc", "#aabbcc", "#b8bec7"]);

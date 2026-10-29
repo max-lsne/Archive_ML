@@ -96,6 +96,6 @@ The smoke test opens both samples, steps through them, explodes the model, highl
 - Browser support for voice: speech synthesis works in all major browsers; speech **recognition** (hands-free mode and the mic button) needs Chrome, Edge or Safari.
 - Some retailers block automated access. If a product page fails, paste a direct link to the instructions PDF.
 - The server listens on localhost only by default; its API has no authentication, so only expose it (`HOST=0.0.0.0`) on networks you trust.
-- Behind an HTTP(S) proxy the proxy performs name resolution, so the fetcher's private-network guard can only check literal addresses and local hostnames; rely on the proxy's own policy for internal hosts.
+- Behind an HTTP(S) proxy the proxy performs name resolution for proxied hosts, so the fetcher's private-network guard applies to literal addresses, local hostnames and hosts dialled directly via NO_PROXY; rely on the proxy's own policy for everything it resolves.
 - Plans are AI-generated from the documentation you provide; dimensions are approximate and the manufacturer's safety instructions always take precedence.
 - A full plan is typically 20–80 KB of JSON; generation for a long manual can take a few minutes. Progress streams to the UI.
