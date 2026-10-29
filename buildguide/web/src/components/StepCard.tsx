@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { useStore } from "../store";
 import { api } from "../api";
 import { minutes } from "../lib/format";
@@ -21,10 +22,11 @@ export function StepCard({ onSpeak, onStop, speaking, ttsSupported }: Props) {
   const toggleCompleted = useStore((s) => s.toggleCompleted);
   const setHighlighted = useStore((s) => s.setHighlighted);
   const highlighted = useStore((s) => s.highlighted);
+  // Hooks must run before the early return below.
+  const components = useMemo(() => componentMap(plan), [plan]);
+  const instancesOf = useMemo(() => instancesByComponent(plan), [plan]);
   const step = plan.steps[stepIndex];
   if (!step) return null;
-  const components = componentMap(plan);
-  const instancesOf = instancesByComponent(plan);
   // Same selection rule as the server uses when attaching the manual to chat.
   const pdfSources = project.sources.filter((s) => s.kind === "pdf");
   const manualOrdinal = pickManualIndex(project.sources);

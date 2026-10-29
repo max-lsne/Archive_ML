@@ -244,10 +244,18 @@ export function useVoice() {
     };
   }, [voice.handsFree, recognizer, setVoiceStatus, setLastHeard]);
 
+  // Unmount: stop everything and leave the shared voice state idle so the next
+  // workspace does not open showing a stale "speaking" / "listening" status.
   useEffect(() => () => {
+    handsFreeRef.current = false; // keeps a settled listenOnce from rescheduling
+    listenOnceInterruptRef.current?.();
+    if (restartTimer.current) window.clearTimeout(restartTimer.current);
+    restartTimer.current = null;
     recognizer.stop();
     stopSpeaking();
-  }, [recognizer]);
+    speakingRef.current = false;
+    setVoiceStatus("idle");
+  }, [recognizer, setVoiceStatus]);
 
   /** Push-to-talk: one utterance, resolved with the final transcript ("" if nothing). */
   const listenOnce = useCallback((): Promise<string> => {

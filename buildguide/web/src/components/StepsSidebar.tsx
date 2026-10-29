@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useStore } from "../store";
 import { minutes, bytes, hostOf, cap } from "../lib/format";
 import { api } from "../api";
@@ -54,7 +54,7 @@ function PartsList() {
   const plan = useStore((s) => s.plan)!;
   const highlighted = useStore((s) => s.highlighted);
   const highlightComponent = useStore((s) => s.highlightComponent);
-  const instancesOf = instancesByComponent(plan);
+  const instancesOf = useMemo(() => instancesByComponent(plan), [plan]);
   const isActive = (id: string) => {
     const ids = instancesOf.get(id) ?? [];
     return ids.length > 0 && ids.every((x) => highlighted.includes(x));
@@ -141,6 +141,8 @@ function Overview() {
                   <a href={api.manualUrl(project.id, project.sources.filter((x) => x.kind === "pdf").indexOf(s))} target="_blank" rel="noreferrer">
                     {s.title}
                   </a>
+                ) : s.url.startsWith("sample://") ? (
+                  <span>{s.title || "Built-in sample"}</span>
                 ) : (
                   <a href={s.url} target="_blank" rel="noreferrer">
                     {s.title || hostOf(s.url)}

@@ -120,6 +120,8 @@ export const useStore = create<State>((set, get) => ({
       chat: same ? get().chat : [],
       view: null,
       exploded: 0,
+      voiceStatus: "idle",
+      lastHeard: "",
     });
   },
 
