@@ -69,3 +69,19 @@ export type ChatEvent =
   | { type: "action"; action: UiAction }
   | { type: "done"; text: string; usage?: Partial<Usage> }
   | { type: "error"; message: string };
+
+/**
+ * Index, among the PDF sources, of the document most likely to be the assembly
+ * manual: prefer PDFs that were handed to Claude, then the one with most pages.
+ * Returns -1 when the project has no PDF. Used by both the chat route and the
+ * step card so the assistant and the "Manual p.N" links agree.
+ */
+export function pickManualIndex(sources: SourceDoc[]): number {
+  const pdfs = sources.filter((s) => s.kind === "pdf");
+  if (!pdfs.length) return -1;
+  const eligible = pdfs.filter((s) => s.sentAsDocument !== false);
+  const pool = eligible.length ? eligible : pdfs;
+  let best = pool[0];
+  for (const s of pool) if ((s.pages ?? 0) > (best.pages ?? 0)) best = s;
+  return pdfs.indexOf(best);
+}
