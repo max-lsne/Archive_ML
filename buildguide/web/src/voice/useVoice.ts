@@ -58,6 +58,12 @@ export function useVoice() {
     }, delay);
   }, []);
 
+  /** Back off when the recognizer keeps ending (or failing to start) without hearing anything. */
+  const scheduleRetry = useCallback(() => {
+    idleEnds.current += 1;
+    scheduleListen(Math.min(RESTART_MAX_MS, RESTART_BASE_MS * 2 ** Math.max(0, idleEnds.current - 1)));
+  }, [scheduleListen]);
+
   const say = useCallback(
     (text: string) => {
       if (!supported.tts || !text.trim()) return;
@@ -135,7 +141,8 @@ export function useVoice() {
           s.prevStep();
           return;
         case "repeat":
-          s.repeatStep();
+          // Explicit request: speak even when automatic narration is off.
+          speakCurrentStep();
           return;
         case "goto":
           if (cmd.step < 1 || cmd.step > p.steps.length) say(`There are only ${p.steps.length} steps.`);
@@ -180,7 +187,7 @@ export function useVoice() {
           return;
       }
     },
-    [say, stop],
+    [say, stop, speakCurrentStep],
   );
   dispatchRef.current = dispatch;
 
@@ -199,11 +206,12 @@ export function useVoice() {
       },
       onEnd: () => {
         if (fatal || !handsFreeRef.current || speakingRef.current) return;
-        // Back off when the recognizer keeps ending without hearing anything,
-        // so a flaky service doesn't turn into a tight restart loop.
-        idleEnds.current = gotResult ? 0 : idleEnds.current + 1;
-        const delay = Math.min(RESTART_MAX_MS, RESTART_BASE_MS * 2 ** Math.max(0, idleEnds.current - 1));
-        scheduleListen(delay);
+        if (gotResult) {
+          idleEnds.current = 0;
+          scheduleListen(RESTART_BASE_MS);
+        } else {
+          scheduleRetry();
+        }
       },
       onError: (err) => {
         const message = FATAL_STT_ERRORS[err];
@@ -221,11 +229,9 @@ export function useVoice() {
     } else {
       // start() can throw right after an abort (Chrome's InvalidStateError);
       // treat it like an idle end and retry with the same backoff.
-      idleEnds.current += 1;
-      const delay = Math.min(RESTART_MAX_MS, RESTART_BASE_MS * 2 ** Math.max(0, idleEnds.current - 1));
-      scheduleListen(delay);
+      scheduleRetry();
     }
-  }, [recognizer, supported.stt, scheduleListen, setLastHeard, setVoiceStatus]);
+  }, [recognizer, supported.stt, scheduleListen, scheduleRetry, setLastHeard, setVoiceStatus]);
   startListeningRef.current = startListening;
 
   useEffect(() => {

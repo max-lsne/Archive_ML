@@ -1,6 +1,7 @@
 import { useStore } from "../store";
 import { api } from "../api";
 import { minutes, cap } from "../lib/format";
+import { pdfSources } from "../../../shared/project";
 
 interface Props {
   onNavigateHome: () => void;
@@ -26,7 +27,7 @@ export function TopBar({ onNavigateHome, onToggleVoicePanel, voicePanelOpen, sup
   const setVoice = useStore((s) => s.setVoice);
   const voiceStatus = useStore((s) => s.voiceStatus);
   if (!project || !plan) return null;
-  const pdfSources = project.sources.filter((s) => s.kind === "pdf");
+  const pdfs = pdfSources(project.sources);
   const quality = plan.sourceQuality;
 
   return (
@@ -47,9 +48,9 @@ export function TopBar({ onNavigateHome, onToggleVoicePanel, voicePanelOpen, sup
         {quality === "manual" ? "From the manual" : quality === "page" ? "From the product page" : project.demo ? "Sample" : "Generic plan"}
       </span>
       <div className="spacer" />
-      {pdfSources.map((s, i) => (
+      {pdfs.map((s, i) => (
         <a key={s.url} className="btn sm" href={api.manualUrl(project.id, i)} target="_blank" rel="noreferrer" title={s.title}>
-          Manual{pdfSources.length > 1 ? ` ${i + 1}` : ""} ({s.pages ?? "?"} p)
+          Manual{pdfs.length > 1 ? ` ${i + 1}` : ""} ({s.pages ?? "?"} p)
         </a>
       ))}
       <button

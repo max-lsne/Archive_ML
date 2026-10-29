@@ -20,7 +20,6 @@ export function Workspace({ live, onNavigateHome }: Props) {
   const voiceStatus = useStore((s) => s.voiceStatus);
   const nextStep = useStore((s) => s.nextStep);
   const prevStep = useStore((s) => s.prevStep);
-  const repeatStep = useStore((s) => s.repeatStep);
   const [voicePanel, setVoicePanel] = useState(false);
   const { supported, speakCurrentStep, stop, listenOnce, say } = useVoice();
 
@@ -32,12 +31,12 @@ export function Workspace({ live, onNavigateHome }: Props) {
       if (e.ctrlKey || e.metaKey || e.altKey) return; // leave browser chords (Ctrl+R, Cmd+P, Cmd+N) alone
       if (e.key === "ArrowRight" || e.key === "n") nextStep();
       else if (e.key === "ArrowLeft" || e.key === "p") prevStep();
-      else if (e.key === "r") repeatStep();
+      else if (e.key === "r") speakCurrentStep();
       else if (e.key === "Escape") stop();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [nextStep, prevStep, repeatStep, stop]);
+  }, [nextStep, prevStep, speakCurrentStep, stop]);
 
   if (!plan) return null;
   const vis = (pane: typeof mobilePane) => (mobilePane === pane ? "mobile-visible" : "");

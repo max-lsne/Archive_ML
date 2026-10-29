@@ -3,6 +3,7 @@ import { useStore } from "../store";
 import { minutes, bytes, hostOf, cap } from "../lib/format";
 import { api } from "../api";
 import { instancesByComponent, type Component } from "../../../shared/plan";
+import { pdfSources } from "../../../shared/project";
 
 type Tab = "steps" | "parts" | "overview";
 
@@ -138,7 +139,7 @@ function Overview() {
             {project.sources.map((s, i) => (
               <li key={s.url + i}>
                 {s.kind === "pdf" ? (
-                  <a href={api.manualUrl(project.id, project.sources.filter((x) => x.kind === "pdf").indexOf(s))} target="_blank" rel="noreferrer">
+                  <a href={api.manualUrl(project.id, pdfSources(project.sources).indexOf(s))} target="_blank" rel="noreferrer">
                     {s.title}
                   </a>
                 ) : s.url.startsWith("sample://") ? (

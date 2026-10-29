@@ -49,8 +49,14 @@ export function Home({ config, onOpen }: Props) {
   };
 
   const remove = async (id: string) => {
-    await api.deleteProject(id);
-    void refresh();
+    try {
+      const res = await api.deleteProject(id);
+      if (!res.ok && res.status !== 404) throw new Error(`Could not delete the guide (${res.status}).`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      void refresh();
+    }
   };
 
   const live = config?.liveGeneration ?? false;

@@ -55,7 +55,6 @@ interface State {
   setView: (view: CameraHint) => void;
   setExploded: (v: number) => void;
   toggle: (key: "ghostFuture" | "autoRotate" | "showLabels") => void;
-  repeatStep: () => void;
   sendChat: (text: string, opts?: { spoken?: boolean }) => Promise<void>;
   clearChat: () => void;
   applyAction: (a: UiAction) => void;
@@ -78,6 +77,9 @@ function loadVoice(): VoiceSettings {
 
 let uid = 0;
 const nextId = () => `m${++uid}_${Date.now().toString(36)}`;
+
+/** The in-flight chat request, so switching projects can cancel it. */
+let activeChat: AbortController | null = null;
 
 export const useStore = create<State>((set, get) => ({
   project: null,
@@ -104,6 +106,11 @@ export const useStore = create<State>((set, get) => ({
   loadProject: (p) => {
     const prev = get().project;
     const same = prev?.id === p.id;
+    if (!same && activeChat) {
+      // A reply still streaming for the previous project must not touch this one.
+      activeChat.abort();
+      activeChat = null;
+    }
     let completed: Record<number, boolean> = {};
     try {
       completed = JSON.parse(localStorage.getItem(`buildguide.done.${p.id}`) ?? "{}");
@@ -118,6 +125,7 @@ export const useStore = create<State>((set, get) => ({
       highlighted: [],
       selected: null,
       chat: same ? get().chat : [],
+      chatBusy: same ? get().chatBusy : false,
       view: null,
       exploded: 0,
       voiceStatus: "idle",
@@ -170,7 +178,6 @@ export const useStore = create<State>((set, get) => ({
   setView: (view) => set((s) => ({ view, viewNonce: s.viewNonce + 1 })),
   setExploded: (v) => set({ exploded: Math.max(0, Math.min(1, v)) }),
   toggle: (key) => set((s) => ({ [key]: !s[key] }) as Partial<State>),
-  repeatStep: () => set((s) => ({ speakNonce: s.speakNonce + 1 })),
 
   applyAction: (a) => {
     const { plan } = get();
@@ -200,33 +207,42 @@ export const useStore = create<State>((set, get) => ({
     const reply: ChatEntry = { id: nextId(), role: "assistant", content: "", streaming: true, actions: [], spoken: opts?.spoken };
     set((s) => ({ chat: [...s.chat, userMsg, reply], chatBusy: true }));
     const history = [...get().chat.filter((m) => !m.streaming && !m.error).map((m) => ({ role: m.role, content: m.content }))];
-    const patch = (p: Partial<ChatEntry>) =>
+    const controller = new AbortController();
+    activeChat = controller;
+    const projectId = project.id;
+    /** False once another project was loaded or this request was superseded. */
+    const current = () => activeChat === controller && !controller.signal.aborted && get().project?.id === projectId;
+    const patch = (p: Partial<ChatEntry>) => {
+      if (!current()) return;
       set((s) => ({ chat: s.chat.map((m) => (m.id === reply.id ? { ...m, ...p } : m)) }));
+    };
     try {
       await api.chat(project.id, history, get().stepIndex, (ev) => {
+        if (!current()) return;
         if (ev.type === "text") {
           set((s) => ({ chat: s.chat.map((m) => (m.id === reply.id ? { ...m, content: m.content + ev.text } : m)) }));
         } else if (ev.type === "action") {
           get().applyAction(ev.action);
           set((s) => ({ chat: s.chat.map((m) => (m.id === reply.id ? { ...m, actions: [...(m.actions ?? []), ev.action] } : m)) }));
         } else if (ev.type === "done") {
-          const current = get().chat.find((m) => m.id === reply.id);
-          const text = ev.text || current?.content || "";
+          const entry = get().chat.find((m) => m.id === reply.id);
+          const text = ev.text || entry?.content || "";
           // An empty reply would be dropped from the history sent back to the
           // server, merging two user turns; keep a short placeholder instead.
-          const placeholder = current?.actions?.length
+          const placeholder = entry?.actions?.length
             ? "I've updated the 3D view for you."
             : "I couldn't come up with an answer to that. Try rephrasing.";
           patch({ content: text.trim() ? text : placeholder, streaming: false });
         } else if (ev.type === "error") {
           patch({ error: ev.message, streaming: false });
         }
-      });
+      }, controller.signal);
     } catch (e) {
-      patch({ error: e instanceof Error ? e.message : String(e), streaming: false });
+      if (!controller.signal.aborted) patch({ error: e instanceof Error ? e.message : String(e), streaming: false });
     } finally {
       patch({ streaming: false });
-      set({ chatBusy: false });
+      if (current()) set({ chatBusy: false });
+      if (activeChat === controller) activeChat = null;
     }
   },
   clearChat: () => set({ chat: [] }),

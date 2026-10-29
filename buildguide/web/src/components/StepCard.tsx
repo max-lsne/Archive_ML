@@ -3,7 +3,7 @@ import { useStore } from "../store";
 import { api } from "../api";
 import { minutes } from "../lib/format";
 import { componentMap, instancesByComponent } from "../../../shared/plan";
-import { pickManualIndex } from "../../../shared/project";
+import { pdfSources, pickManualIndex } from "../../../shared/project";
 
 interface Props {
   onSpeak: () => void;
@@ -28,9 +28,9 @@ export function StepCard({ onSpeak, onStop, speaking, ttsSupported }: Props) {
   const step = plan.steps[stepIndex];
   if (!step) return null;
   // Same selection rule as the server uses when attaching the manual to chat.
-  const pdfSources = project.sources.filter((s) => s.kind === "pdf");
+  const pdfs = pdfSources(project.sources);
   const manualOrdinal = pickManualIndex(project.sources);
-  const manual = manualOrdinal >= 0 ? pdfSources[manualOrdinal] : undefined;
+  const manual = manualOrdinal >= 0 ? pdfs[manualOrdinal] : undefined;
   const manualPages = manual ? step.manualPages.filter((p) => !manual.pages || p <= manual.pages) : [];
   const isLast = stepIndex === plan.steps.length - 1;
   const done = Boolean(completed[step.id]);
