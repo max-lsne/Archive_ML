@@ -25,7 +25,7 @@ import { PlanCancelled, createPlanner } from "./planner.js";
 import { runClaudeChat, runMockChat, type ChatContext } from "./chat.js";
 import { SAMPLE_PLANS, findSample } from "../../shared/samples/index.js";
 import { normalizePlan } from "../../shared/plan.js";
-import { pickManualIndex, type ChatMessage, type Project, canAttachPdf } from "../../shared/project.js";
+import { pickManualIndex, pdfSources, type ChatMessage, type Project, canAttachPdf } from "../../shared/project.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -160,7 +160,7 @@ async function runPipeline(project: Project): Promise<void> {
     );
     checkAlive();
     for (const [i, sent] of result.sentAsDocument.entries()) {
-      const src = project.sources.filter((s) => s.kind === "pdf")[i];
+      const src = pdfSources(project.sources)[i];
       if (src) src.sentAsDocument = sent;
     }
     await update({ status: "ready", progress: "Ready", plan: result.plan, usage: result.usage, progressChars: undefined }, true);
@@ -240,7 +240,7 @@ async function cachedManual(p: Project): Promise<{ title: string; data: string }
   // Only a PDF the planner itself attached; never fall back to one it skipped.
   const idx = pickManualIndex(p.sources, { attachedOnly: true });
   if (idx < 0) return undefined;
-  const source = p.sources.filter((s) => s.kind === "pdf")[idx];
+  const source = pdfSources(p.sources)[idx];
   if (!source) return undefined;
   // The planner's attach predicate, shared so chat and plan agree on the manual.
   const limits = { maxAttachPdfBytes: config.maxAttachPdfBytes, maxPdfPages: config.maxPdfPages };
@@ -268,7 +268,8 @@ app.post("/api/projects/:id/chat", async (req, res) => {
   if (!history.length || history[history.length - 1].role !== "user") {
     return res.status(400).json({ error: "Send at least one user message." });
   }
-  const stepIndex = Math.max(0, Math.min(p.plan.steps.length - 1, Number(req.body?.stepIndex ?? 0) || 0));
+  const rawStep = Math.trunc(Number(req.body?.stepIndex ?? 0));
+  const stepIndex = Math.max(0, Math.min(p.plan.steps.length - 1, Number.isFinite(rawStep) ? rawStep : 0));
 
   const sse = new SseWriter(res);
   // Stop paying for tokens the moment the browser goes away.

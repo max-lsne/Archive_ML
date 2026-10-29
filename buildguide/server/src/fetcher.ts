@@ -5,6 +5,7 @@
  */
 import * as cheerio from "cheerio";
 import { extractText } from "unpdf";
+import { Worker } from "node:worker_threads";
 import dns from "node:dns/promises";
 import dnsCallback from "node:dns";
 import net from "node:net";
@@ -148,11 +149,26 @@ function proxyEnv(): string | undefined {
   return process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
 }
 
+/** Hostnames of the configured proxies; they may legitimately live on private addresses. */
+function proxyHosts(): Set<string> {
+  const out = new Set<string>();
+  for (const v of [process.env.HTTPS_PROXY, process.env.https_proxy, process.env.HTTP_PROXY, process.env.http_proxy]) {
+    if (!v) continue;
+    try {
+      out.add(new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(v) ? v : `http://${v}`).hostname.replace(/^\[|\]$/g, "").toLowerCase());
+    } catch {
+      /* ignore malformed proxy setting */
+    }
+  }
+  return out;
+}
+
 const guardedLookup: net.LookupFunction = (hostname, options, callback) => {
   dnsCallback.lookup(hostname, options, (err, address, family) => {
     if (err) return callback(err, address, family);
     const addresses = Array.isArray(address) ? address.map((a) => a.address) : [address];
-    if (!config.allowPrivateUrls && addresses.some((a) => typeof a === "string" && isPrivateAddress(a))) {
+    const isProxy = proxyHosts().has(hostname.replace(/^\[|\]$/g, "").toLowerCase());
+    if (!config.allowPrivateUrls && !isProxy && addresses.some((a) => typeof a === "string" && isPrivateAddress(a))) {
       const refused: NodeJS.ErrnoException = new Error(`${hostname} resolves to a private network address`);
       refused.code = "EPRIVATEADDR";
       return callback(refused, address, family);
@@ -164,13 +180,15 @@ const guardedLookup: net.LookupFunction = (hostname, options, callback) => {
 let dispatcher: Dispatcher | undefined;
 function getDispatcher(): Dispatcher {
   if (dispatcher) return dispatcher;
-  // Direct connections resolve names through guardedLookup, which refuses private
-  // addresses at connect time. Behind a proxy (HTTPS_PROXY / HTTP_PROXY) name
-  // resolution is the proxy's job: undici's proxy agent offers no lookup hook, so
-  // the pin cannot apply there and the proxy's own policy decides what internal
-  // names it will reach. assertPublicHost still rejects literal and local hosts
-  // on every hop in both modes.
-  dispatcher = proxyEnv() ? new EnvHttpProxyAgent() : new Agent({ connect: { lookup: guardedLookup } });
+  // Every direct connection resolves names through guardedLookup, which refuses
+  // private addresses at connect time. Behind a proxy (HTTPS_PROXY / HTTP_PROXY)
+  // proxied hosts are resolved by the proxy itself, whose policy decides what it
+  // reaches; hosts dialled directly (NO_PROXY) still go through guardedLookup,
+  // because EnvHttpProxyAgent forwards `connect` options to its internal agents.
+  // The proxy's own hostname is exempt (it may sit on a private address).
+  // assertPublicHost additionally rejects literal and local hosts on every hop.
+  const connect = { lookup: guardedLookup };
+  dispatcher = proxyEnv() ? new EnvHttpProxyAgent({ connect }) : new Agent({ connect });
   return dispatcher;
 }
 
@@ -271,20 +289,21 @@ async function fetchBytes(url: string, maxBytes: number, accept = "*/*", signal?
           throw new FetchError(`File is too large (over ${(maxBytes / 1e6).toFixed(0)} MB).`);
         }
         chunks.push(value);
-        if (opts.expectPdf && !magicChecked && total >= 5) {
-          // Decide on the first bytes rather than after buffering up to the cap.
+        if (opts.expectPdf && !magicChecked && total >= PDF_MAGIC_WINDOW + 5) {
+          // Decide on the first kilobyte rather than after buffering up to the cap
+          // (the header may sit anywhere in the first 1024 bytes).
           magicChecked = true;
-          if (!hasPdfMagic(Buffer.concat(chunks).subarray(0, 5)) && mime !== "application/pdf") {
+          if (!hasPdfMagic(Buffer.concat(chunks)) && mime !== "application/pdf") {
             reader.cancel().catch(() => {});
             throw new FetchError("The link was not a PDF.");
           }
         }
       }
-      return {
-        finalUrl: current.toString(),
-        contentType,
-        bytes: Buffer.concat(chunks),
-      };
+      const bytes = Buffer.concat(chunks);
+      if (opts.expectPdf && !magicChecked && !hasPdfMagic(bytes) && mime !== "application/pdf") {
+        throw new FetchError("The link was not a PDF.");
+      }
+      return { finalUrl: current.toString(), contentType, bytes };
     }
   } catch (e) {
     if (e instanceof FetchError) throw e;
@@ -307,8 +326,11 @@ async function fetchBytes(url: string, maxBytes: number, accept = "*/*", signal?
   }
 }
 
+/** The PDF spec allows the "%PDF-" header anywhere in the first 1024 bytes. */
+export const PDF_MAGIC_WINDOW = 1024;
+
 export function hasPdfMagic(bytes: Uint8Array): boolean {
-  return Buffer.from(bytes.subarray(0, 5)).toString("latin1") === "%PDF-";
+  return Buffer.from(bytes.subarray(0, PDF_MAGIC_WINDOW + 5)).toString("latin1").includes("%PDF-");
 }
 
 /**
@@ -450,11 +472,58 @@ export function parseHtml(html: string, baseUrl: string): ParsedPage {
 
 // ---------------------------------------------------------------------------
 
+const PDF_WORKER_TIMEOUT_MS = 60_000;
+
+/**
+ * Run pdfjs text extraction off the main thread so a 30 MB manual does not stall
+ * every other request. Falls back to in-process extraction when the worker cannot
+ * be started (e.g. running from TypeScript sources under tsx) or times out.
+ */
+async function extractPdfText(bytes: Buffer): Promise<{ totalPages: number; text: string }> {
+  const inProcess = async () => {
+    const r = await extractText(new Uint8Array(bytes), { mergePages: true });
+    return { totalPages: r.totalPages, text: r.text || "" };
+  };
+  let worker: Worker;
+  try {
+    // Copy into a standalone ArrayBuffer so it can be transferred without touching
+    // the caller's Buffer (which may share a larger pool slab).
+    const ab = new ArrayBuffer(bytes.byteLength);
+    new Uint8Array(ab).set(bytes);
+    worker = new Worker(new URL("./pdf-worker.js", import.meta.url), { workerData: { buffer: ab }, transferList: [ab] });
+  } catch (e) {
+    log.warn("pdf worker unavailable, extracting in-process:", e instanceof Error ? e.message : String(e));
+    return inProcess();
+  }
+  const result = await new Promise<{ totalPages: number; text: string } | { fallback: true }>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      worker.terminate().catch(() => {});
+      resolve({ fallback: true });
+    }, PDF_WORKER_TIMEOUT_MS);
+    worker.once("message", (msg: { totalPages?: number; text?: string; error?: string }) => {
+      clearTimeout(timer);
+      if (msg.error !== undefined) reject(new Error(msg.error));
+      else resolve({ totalPages: msg.totalPages ?? 0, text: msg.text ?? "" });
+    });
+    worker.once("error", (err) => {
+      clearTimeout(timer);
+      log.warn("pdf worker crashed, extracting in-process:", err.message);
+      resolve({ fallback: true });
+    });
+    worker.once("exit", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) resolve({ fallback: true });
+    });
+  });
+  if ("fallback" in result) return inProcess();
+  return result;
+}
+
 async function loadPdf(url: string, bytes: Buffer, title: string, warnings: string[]): Promise<PdfDoc> {
   let pages = 0;
   let text = "";
   try {
-    const result = await extractText(new Uint8Array(bytes), { mergePages: true });
+    const result = await extractPdfText(bytes);
     pages = result.totalPages;
     text = (result.text || "").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
   } catch (e) {

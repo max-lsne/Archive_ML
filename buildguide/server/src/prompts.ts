@@ -60,8 +60,13 @@ export function plannerUserText(opts: {
       `Documents attached (${opts.pdfSummaries.length}):\n` +
         opts.pdfSummaries
           .map((p, i) => {
-            const how = p.sentAsDocument ? "attached above as a PDF document" : "text extracted below (PDF too large to attach)";
-            return `  ${i + 1}. "${p.title}" — ${p.pages} pages, ${how}${p.textExcerpt ? `\n     Extracted text:\n${indent(p.textExcerpt, 5)}` : ""}`;
+            const how = p.sentAsDocument
+              ? "attached above as a PDF document"
+              : p.textExcerpt
+                ? "not attached (too large or too many pages); text extracted below"
+                : "not attached and its text could not be extracted";
+            const pages = p.pages > 0 ? `${p.pages} pages` : "page count unknown";
+            return `  ${i + 1}. "${p.title}" — ${pages}, ${how}${p.textExcerpt ? `\n     Extracted text:\n${indent(p.textExcerpt, 5)}` : ""}`;
           })
           .join("\n"),
     );

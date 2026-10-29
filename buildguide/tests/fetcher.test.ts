@@ -158,6 +158,16 @@ describe("isPdf", () => {
   });
 });
 
+describe("isPdf header window", () => {
+  it("accepts %PDF- anywhere in the first 1024 bytes and rejects it beyond", () => {
+    const near = Buffer.concat([Buffer.alloc(900, 0x20), Buffer.from("%PDF-1.7\n%junk")]);
+    const far = Buffer.concat([Buffer.alloc(1100, 0x20), Buffer.from("%PDF-1.7\n")]);
+    expect(isPdf("application/octet-stream", near)).toBe(true);
+    expect(isPdf("application/octet-stream", far)).toBe(false);
+    expect(isPdf("", Buffer.from("\xef\xbb\xbf%PDF-1.4", "latin1"))).toBe(true);
+  });
+});
+
 describe("parseLooseJson", () => {
   it("reports malformed output with a friendly error", () => {
     expect(() => parseLooseJson('{"a":1} {"b":2}')).toThrow("Claude's answer was not valid JSON.");
